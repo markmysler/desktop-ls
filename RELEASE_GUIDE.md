@@ -22,6 +22,11 @@ This guide walks you through publishing a new release of DesktopLS to GitHub and
    dotnet publish src/DesktopLS/DesktopLS.csproj -c Release
    ```
 
+   **Note:** If `dotnet` is not in your PATH, use the full path:
+   ```powershell
+   & 'C:\Program Files\dotnet\dotnet.exe' publish src/DesktopLS/DesktopLS.csproj -c Release
+   ```
+
 3. **Verify the output:**
    The executable will be at:
    ```

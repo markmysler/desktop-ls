@@ -1,5 +1,4 @@
 using System.IO;
-using System.Reflection;
 using System.Text.Json;
 using Microsoft.Win32;
 
@@ -99,8 +98,10 @@ public sealed class SettingsService
 
                 if (_startupEnabled)
                 {
-                    string exePath = Assembly.GetExecutingAssembly().Location.Replace(".dll", ".exe");
-                    key.SetValue(RegistryValueName, exePath, RegistryValueKind.String);
+                    // Use Environment.ProcessPath for single-file apps
+                    string? exePath = Environment.ProcessPath;
+                    if (!string.IsNullOrEmpty(exePath))
+                        key.SetValue(RegistryValueName, exePath, RegistryValueKind.String);
                 }
                 else
                 {
