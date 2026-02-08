@@ -36,11 +36,7 @@ winget install MarkX.DesktopLS
 1. Go to [Releases](../../releases) and download `DesktopLS.exe` from the latest release
 2. Place it anywhere (e.g. `%LocalAppData%\DesktopLS\DesktopLS.exe`)
 3. Double-click to run — no installer needed
-
-To run on startup, create a shortcut to `DesktopLS.exe` in:
-```
-%APPDATA%\Microsoft\Windows\Start Menu\Programs\Startup
-```
+4. To run on startup, open the app and enable "Run on startup" in Settings (⋮ button)
 
 ### Option 3 — Build from source
 

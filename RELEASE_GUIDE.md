@@ -104,18 +104,17 @@ This guide walks you through publishing a new release of DesktopLS to GitHub and
 
 ## Step 3: Get SHA256 Hash (for winget)
 
-You'll need the SHA256 hash of the release binary for the winget manifest.
+Get the SHA256 hash of your **local** release binary (you'll need this later for the winget manifest).
 
 ```powershell
-$url = "https://github.com/markmysler/desktop-ls/releases/download/v1.0.0/DesktopLS.exe"
-$file = "$env:TEMP\DesktopLS.exe"
-Invoke-WebRequest -Uri $url -OutFile $file
-$hash = (Get-FileHash $file -Algorithm SHA256).Hash
+$binaryPath = "src\DesktopLS\bin\Release\net8.0-windows\win-x64\publish\DesktopLS.exe"
+$hash = (Get-FileHash $binaryPath -Algorithm SHA256).Hash
 Write-Host "SHA256: $hash"
-Remove-Item $file
+Write-Host ""
+Write-Host "Save this hash for later!"
 ```
 
-**Save this hash** — you'll need it for the winget manifest.
+**Important:** Copy this hash somewhere - you'll need it when creating the winget manifest in Step 4.
 
 ---
 
