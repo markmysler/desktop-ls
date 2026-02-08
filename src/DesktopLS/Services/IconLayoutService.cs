@@ -67,6 +67,13 @@ public class IconLayoutService
         return _store.TryGetValue(key, out var dict) && dict.Count > 0;
     }
 
+    public int GetSavedCount(string? folderPath)
+    {
+        if (string.IsNullOrEmpty(folderPath)) return 0;
+        string key = MakeKey(folderPath);
+        return _store.TryGetValue(key, out var dict) ? dict.Count : 0;
+    }
+
     private static string MakeKey(string folderPath)
         => $"{folderPath}|{DesktopIconManager.GetMonitorSignature()}";
 

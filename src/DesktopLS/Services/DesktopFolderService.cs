@@ -1,4 +1,3 @@
-using System.Diagnostics;
 using System.IO;
 using System.Runtime.InteropServices;
 
@@ -46,6 +45,8 @@ public sealed class DesktopFolderService : IDisposable
     private readonly string _originalUserDesktop;
     private readonly IconLayoutService _iconLayouts = new();
     private bool _disposed;
+    private bool _publicStashed;
+    private bool _crashStateWritten;
     private string? _currentRedirectedPath;
 
     public DesktopFolderService()
@@ -83,26 +84,45 @@ public sealed class DesktopFolderService : IDisposable
         if (!Directory.Exists(path))
             throw new ArgumentException($"Directory does not exist: {path}", nameof(path));
 
+        bool goingToOriginal = string.Equals(path, _originalUserDesktop, StringComparison.OrdinalIgnoreCase);
+
         // Save current layout before switching
         _iconLayouts.SaveLayout(_currentRedirectedPath ?? _originalUserDesktop);
 
-        // Persist state for crash recovery before first redirect
-        if (_currentRedirectedPath == null)
+        // Write crash-recovery state on first redirect away from original
+        if (!goingToOriginal && !_crashStateWritten)
         {
             File.WriteAllText(UserStateFile, _originalUserDesktop);
+            _crashStateWritten = true;
+        }
+
+        // Stash/restore Public Desktop BEFORE redirect so items vanish
+        // before the new folder appears (no lingering icons).
+        if (!goingToOriginal && !_publicStashed)
+        {
             StashPublicDesktop();
+            _publicStashed = true;
+        }
+        else if (goingToOriginal && _publicStashed)
+        {
+            RestorePublicDesktop();
+            _publicStashed = false;
         }
 
         SetKnownFolderPath(path);
         _currentRedirectedPath = path;
 
-        // Restore layout for new folder once icons have loaded
-        string targetPath = path;
+        // Restore saved layout (or auto-arrange grid for first visit)
+        string snapshotPath = path;
+        bool hasLayout = _iconLayouts.HasLayout(path);
+        int expectedCount = hasLayout ? _iconLayouts.GetSavedCount(path) : 1;
         _ = Task.Run(async () =>
         {
-            await WaitForIconsAsync();
-            if (_iconLayouts.HasLayout(targetPath))
-                _iconLayouts.RestoreLayout(targetPath);
+            await WaitForIconsAsync(expectedCount);
+            if (hasLayout)
+                _iconLayouts.RestoreLayout(snapshotPath);
+            else
+                Native.DesktopIconManager.ArrangeInGrid();
         });
     }
 
@@ -111,23 +131,31 @@ public sealed class DesktopFolderService : IDisposable
     {
         if (_currentRedirectedPath == null) return;
 
-        // Save the current folder's layout before restoring original desktop
         _iconLayouts.SaveLayout(_currentRedirectedPath);
 
+        if (_publicStashed)
+        {
+            RestorePublicDesktop();
+            _publicStashed = false;
+        }
+
         SetKnownFolderPath(_originalUserDesktop);
-        RestorePublicDesktop();
         _currentRedirectedPath = null;
+        _crashStateWritten = false;
 
         TryDelete(UserStateFile);
 
-        // Restore original desktop icon layout
-        string origPath = _originalUserDesktop;
-        _ = Task.Run(async () =>
+        // Restore original desktop icon positions after public items are back
+        if (_iconLayouts.HasLayout(_originalUserDesktop))
         {
-            await WaitForIconsAsync();
-            if (_iconLayouts.HasLayout(origPath))
+            string origPath = _originalUserDesktop;
+            int origCount = _iconLayouts.GetSavedCount(_originalUserDesktop);
+            _ = Task.Run(async () =>
+            {
+                await WaitForIconsAsync(origCount);
                 _iconLayouts.RestoreLayout(origPath);
-        });
+            });
+        }
     }
 
     public void Dispose()
@@ -137,25 +165,22 @@ public sealed class DesktopFolderService : IDisposable
         Restore();
     }
 
-    // ── Icon polling ─────────────────────────────────────────────────────
+    // ── Icon readiness polling ────────────────────────────────────────────
 
-    private static async Task WaitForIconsAsync(int timeoutMs = 3000)
+    private static async Task WaitForIconsAsync(int expectedMin, int timeoutMs = 2000)
     {
+        if (expectedMin <= 0) expectedMin = 1;
         int stable = 0, last = -1;
-        var sw = Stopwatch.StartNew();
+        var sw = System.Diagnostics.Stopwatch.StartNew();
         while (sw.ElapsedMilliseconds < timeoutMs)
         {
             int count = Native.DesktopIconManager.GetIconCount();
-            if (count > 0 && count == last)
+            if (count >= expectedMin)
             {
-                if (++stable >= 3) break;
+                if (count == last) { if (++stable >= 2) break; }
+                else { stable = 0; last = count; }
             }
-            else
-            {
-                stable = 0;
-                last = count;
-            }
-            await Task.Delay(100);
+            await Task.Delay(50);
         }
     }
 
@@ -179,17 +204,27 @@ public sealed class DesktopFolderService : IDisposable
 
     // ── Public Desktop stash ─────────────────────────────────────────────
 
-    private static void StashPublicDesktop()
+    private void StashPublicDesktop()
     {
         try
         {
             if (!Directory.Exists(PublicDesktopPath)) return;
+
+            // Build set of names already in the user's desktop so we skip duplicates
+            var userNames = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            if (Directory.Exists(_originalUserDesktop))
+            {
+                foreach (var e in Directory.GetFileSystemEntries(_originalUserDesktop))
+                    userNames.Add(Path.GetFileName(e));
+            }
+
             Directory.CreateDirectory(PublicStashDir);
 
             foreach (var item in Directory.GetFileSystemEntries(PublicDesktopPath))
             {
                 string name = Path.GetFileName(item);
                 if (name.Equals("desktop.ini", StringComparison.OrdinalIgnoreCase)) continue;
+                if (userNames.Contains(name)) continue; // already present in user desktop
 
                 string dest = Path.Combine(PublicStashDir, name);
                 if (File.Exists(item))
