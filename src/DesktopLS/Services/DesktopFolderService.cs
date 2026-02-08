@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using System.IO;
 using System.Runtime.InteropServices;
 
@@ -8,6 +9,7 @@ namespace DesktopLS.Services;
 /// Uses SHSetKnownFolderPath for the user desktop and stashes the
 /// Public Desktop contents (C:\Users\Public\Desktop) so no merged
 /// shortcuts bleed through.
+/// Saves and restores desktop icon positions per folder.
 /// </summary>
 public sealed class DesktopFolderService : IDisposable
 {
@@ -42,6 +44,7 @@ public sealed class DesktopFolderService : IDisposable
         Environment.GetFolderPath(Environment.SpecialFolder.CommonDesktopDirectory);
 
     private readonly string _originalUserDesktop;
+    private readonly IconLayoutService _iconLayouts = new();
     private bool _disposed;
     private string? _currentRedirectedPath;
 
@@ -80,6 +83,9 @@ public sealed class DesktopFolderService : IDisposable
         if (!Directory.Exists(path))
             throw new ArgumentException($"Directory does not exist: {path}", nameof(path));
 
+        // Save current layout before switching
+        _iconLayouts.SaveLayout(_currentRedirectedPath ?? _originalUserDesktop);
+
         // Persist state for crash recovery before first redirect
         if (_currentRedirectedPath == null)
         {
@@ -89,6 +95,15 @@ public sealed class DesktopFolderService : IDisposable
 
         SetKnownFolderPath(path);
         _currentRedirectedPath = path;
+
+        // Restore layout for new folder once icons have loaded
+        string targetPath = path;
+        _ = Task.Run(async () =>
+        {
+            await WaitForIconsAsync();
+            if (_iconLayouts.HasLayout(targetPath))
+                _iconLayouts.RestoreLayout(targetPath);
+        });
     }
 
     /// <summary>Restores the original desktop. Safe to call multiple times.</summary>
@@ -96,11 +111,23 @@ public sealed class DesktopFolderService : IDisposable
     {
         if (_currentRedirectedPath == null) return;
 
+        // Save the current folder's layout before restoring original desktop
+        _iconLayouts.SaveLayout(_currentRedirectedPath);
+
         SetKnownFolderPath(_originalUserDesktop);
         RestorePublicDesktop();
         _currentRedirectedPath = null;
 
         TryDelete(UserStateFile);
+
+        // Restore original desktop icon layout
+        string origPath = _originalUserDesktop;
+        _ = Task.Run(async () =>
+        {
+            await WaitForIconsAsync();
+            if (_iconLayouts.HasLayout(origPath))
+                _iconLayouts.RestoreLayout(origPath);
+        });
     }
 
     public void Dispose()
@@ -108,6 +135,28 @@ public sealed class DesktopFolderService : IDisposable
         if (_disposed) return;
         _disposed = true;
         Restore();
+    }
+
+    // ── Icon polling ─────────────────────────────────────────────────────
+
+    private static async Task WaitForIconsAsync(int timeoutMs = 3000)
+    {
+        int stable = 0, last = -1;
+        var sw = Stopwatch.StartNew();
+        while (sw.ElapsedMilliseconds < timeoutMs)
+        {
+            int count = Native.DesktopIconManager.GetIconCount();
+            if (count > 0 && count == last)
+            {
+                if (++stable >= 3) break;
+            }
+            else
+            {
+                stable = 0;
+                last = count;
+            }
+            await Task.Delay(100);
+        }
     }
 
     // ── Known folder helpers ──────────────────────────────────────────────
