@@ -26,6 +26,9 @@
 
             <!-- Navigation Buttons -->
             <StackPanel Grid.Column="0" Orientation="Horizontal" Margin="0,0,8,0">
+                <Button Content="&#x22EE;" Style="{StaticResource ToolbarButton}"
+                        x:Name="SettingsButton" ToolTip="Settings"
+                        FontSize="16" Width="32"/>
                 <Button Content="&#x2190;" Style="{StaticResource ToolbarButton}"
                         Command="{Binding GoBackCommand}" ToolTip="Back (Alt+Left)"
                         FontSize="16" Width="32"/>
@@ -38,10 +41,29 @@
                 <Button Content="&#x21BB;" Style="{StaticResource ToolbarButton}"
                         Command="{Binding RefreshCommand}" ToolTip="Refresh (F5)"
                         FontSize="16" Width="32"/>
-                <Button Content="&#x2606;" Style="{StaticResource ToolbarButton}"
-                        Command="{Binding BookmarkCommand}" ToolTip="Bookmark this folder"
-                        FontSize="16" Width="32"/>
             </StackPanel>
+
+            <!-- Settings Popup -->
+            <Popup x:Name="SettingsPopup"
+                   Grid.Column="0"
+                   PlacementTarget="{Binding ElementName=SettingsButton}"
+                   Placement="Bottom"
+                   StaysOpen="False">
+                <Border Background="{StaticResource SurfaceBrush}"
+                        BorderBrush="{StaticResource BorderBrush}"
+                        BorderThickness="1" CornerRadius="4"
+                        Padding="12">
+                    <StackPanel Orientation="Vertical" Width="220">
+                        <CheckBox Content="Run on startup"
+                                  IsChecked="{Binding StartupEnabled, Mode=TwoWay}"
+                                  Margin="0,0,0,8"
+                                  Foreground="{StaticResource TextBrush}"/>
+                        <CheckBox Content="Hide when window maximized"
+                                  IsChecked="{Binding HideOnMaximized, Mode=TwoWay}"
+                                  Foreground="{StaticResource TextBrush}"/>
+                    </StackPanel>
+                </Border>
+            </Popup>
 
             <!-- Path Bar with Autocomplete -->
             <Grid Grid.Column="1" Margin="0,0,8,0">
@@ -71,6 +93,7 @@
                                  Background="Transparent"
                                  Foreground="{StaticResource TextBrush}"
                                  BorderThickness="0"
+                                 Focusable="True"
                                  MouseLeftButtonUp="SuggestionsList_MouseLeftButtonUp"
                                  MouseDoubleClick="SuggestionsList_MouseDoubleClick"
                                  KeyDown="SuggestionsList_KeyDown">

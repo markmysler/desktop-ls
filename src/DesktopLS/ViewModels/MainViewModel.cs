@@ -14,17 +14,20 @@ public sealed class MainViewModel : INotifyPropertyChanged
     private readonly NavigationService _navigation;
     private readonly AutocompleteService _autocomplete;
     private readonly DesktopFolderService _desktopFolder;
+    private readonly SettingsService _settings;
     private string _pathText = string.Empty;
     private bool _isAutocompleteOpen;
 
     public MainViewModel(
         NavigationService navigation,
         AutocompleteService autocomplete,
-        DesktopFolderService desktopFolder)
+        DesktopFolderService desktopFolder,
+        SettingsService settings)
     {
         _navigation = navigation;
         _autocomplete = autocomplete;
         _desktopFolder = desktopFolder;
+        _settings = settings;
 
         Suggestions = new ObservableCollection<string>();
 
@@ -32,14 +35,12 @@ public sealed class MainViewModel : INotifyPropertyChanged
         GoBackCommand = new RelayCommand(OnGoBack, () => _navigation.CanGoBack);
         GoForwardCommand = new RelayCommand(OnGoForward, () => _navigation.CanGoForward);
         GoUpCommand = new RelayCommand(OnGoUp);
-        BookmarkCommand = new RelayCommand(OnBookmark);
         RefreshCommand = new RelayCommand(OnRefresh);
 
         _navigation.NavigationChanged += () =>
         {
             _pathText = _navigation.CurrentPath;
             OnPropertyChanged(nameof(PathText));
-            OnPropertyChanged(nameof(Bookmarks));
         };
     }
 
@@ -59,14 +60,38 @@ public sealed class MainViewModel : INotifyPropertyChanged
         set => SetField(ref _isAutocompleteOpen, value);
     }
 
+    public bool StartupEnabled
+    {
+        get => _settings.StartupEnabled;
+        set
+        {
+            if (_settings.StartupEnabled != value)
+            {
+                _settings.StartupEnabled = value;
+                OnPropertyChanged();
+            }
+        }
+    }
+
+    public bool HideOnMaximized
+    {
+        get => _settings.HideOnMaximized;
+        set
+        {
+            if (_settings.HideOnMaximized != value)
+            {
+                _settings.HideOnMaximized = value;
+                OnPropertyChanged();
+            }
+        }
+    }
+
     public ObservableCollection<string> Suggestions { get; }
-    public IReadOnlyList<string> Bookmarks => _navigation.Bookmarks;
 
     public ICommand NavigateCommand { get; }
     public ICommand GoBackCommand { get; }
     public ICommand GoForwardCommand { get; }
     public ICommand GoUpCommand { get; }
-    public ICommand BookmarkCommand { get; }
     public ICommand RefreshCommand { get; }
 
     public void Initialize(string startPath)
@@ -119,13 +144,6 @@ public sealed class MainViewModel : INotifyPropertyChanged
     {
         string? path = _navigation.GoUp();
         if (path != null) _desktopFolder.SetDesktopPath(path);
-    }
-
-    private void OnBookmark()
-    {
-        if (!string.IsNullOrEmpty(_navigation.CurrentPath))
-            _navigation.AddBookmark(_navigation.CurrentPath);
-        OnPropertyChanged(nameof(Bookmarks));
     }
 
     private void OnRefresh()
