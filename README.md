@@ -50,8 +50,8 @@ To run on startup, create a shortcut to `DesktopLS.exe` in:
 
 **Clone and run (debug build):**
 ```
-git clone https://github.com/you/desktop-ls-win
-cd desktop-ls-win
+git clone https://github.com/markmysler/desktop-ls.git
+cd desktop-ls
 dotnet run --project src/DesktopLS/DesktopLS.csproj
 ```
 
