@@ -1,0 +1,28 @@
+# Build outputs
+bin/
+obj/
+out/
+
+# Visual Studio
+.vs/
+*.user
+*.suo
+*.userosscache
+*.sln.docstates
+
+# Rider
+.idea/
+
+# NuGet
+*.nupkg
+packages/
+*.lock.json
+
+# OS
+Thumbs.db
+Desktop.ini
+.DS_Store
+
+# App runtime data (crash recovery state files)
+src/DesktopLS/bin/
+src/DesktopLS/obj/
