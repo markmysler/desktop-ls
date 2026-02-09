@@ -10,7 +10,7 @@
     <SelfContained>false</SelfContained>
     <Nullable>enable</Nullable>
     <ImplicitUsings>enable</ImplicitUsings>
-    <ApplicationIcon />
+    <ApplicationIcon>Resources\app.ico</ApplicationIcon>
     <StartupObject>DesktopLS.App</StartupObject>
     <RootNamespace>DesktopLS</RootNamespace>
     <AssemblyName>DesktopLS</AssemblyName>
@@ -21,5 +21,9 @@
     <SelfContained>true</SelfContained>
     <PublishTrimmed>false</PublishTrimmed>
   </PropertyGroup>
+
+  <ItemGroup>
+    <Resource Include="Resources\app.ico" />
+  </ItemGroup>
 
 </Project>
