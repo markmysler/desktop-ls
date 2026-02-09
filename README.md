@@ -26,10 +26,8 @@ A lightweight Windows desktop navigation bar. Point your desktop at any folder o
 ### Option 1 — winget (recommended)
 
 ```
-winget install MarkX.DesktopLS
+winget install MarkMysler.DesktopLS
 ```
-
-> Note: winget availability depends on the package being published to the winget repository. Check the [Releases](../../releases) page if winget reports the package as not found.
 
 ### Option 2 — Download pre-built binary
 
