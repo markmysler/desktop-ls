@@ -60,7 +60,16 @@
                                   Foreground="{StaticResource TextBrush}"/>
                         <CheckBox Content="Hide when window maximized"
                                   IsChecked="{Binding HideOnMaximized, Mode=TwoWay}"
+                                  IsEnabled="{Binding CanHideOnMaximized}"
+                                  Margin="0,0,0,8"
                                   Foreground="{StaticResource TextBrush}"/>
+                        <CheckBox Content="Reserve space at the screen edge"
+                                  IsChecked="{Binding ReserveSpace, Mode=TwoWay}"
+                                  ToolTip="Maximized windows stop at the bar instead of covering it. Desktop icons under the bar may be moved by Windows."
+                                  Foreground="{StaticResource TextBrush}"/>
+                        <TextBlock Text="Drag the bar to move it; it snaps to the top or bottom edge."
+                                   TextWrapping="Wrap" FontSize="11" Margin="0,8,0,0"
+                                   Foreground="{StaticResource TextBrush}" Opacity="0.6"/>
                         <Separator Margin="0,10" Background="{StaticResource BorderBrush}"/>
                         <Button Content="Stop using DesktopLS…"
                                 Click="UndoSetup_Click"

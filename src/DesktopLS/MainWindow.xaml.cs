@@ -1,5 +1,6 @@
 using System.Windows;
 using System.Windows.Input;
+using DesktopLS.Native;
 using DesktopLS.Services;
 using DesktopLS.ViewModels;
 
@@ -11,6 +12,7 @@ public partial class MainWindow : Window
     private readonly DesktopFolderService _desktopFolder;
     private readonly SettingsService _settings;
     private readonly WindowMonitorService _windowMonitor;
+    private readonly BarPositioner _positioner;
 
     public MainWindow()
     {
@@ -33,7 +35,7 @@ public partial class MainWindow : Window
         _settings.Load();
 
         _windowMonitor = new WindowMonitorService(this);
-        _windowMonitor.Enabled = _settings.HideOnMaximized;
+        _windowMonitor.Enabled = _settings.HideOnMaximized && !_settings.ReserveSpace;
 
         _viewModel = new MainViewModel(navigation, autocomplete, _desktopFolder, _settings);
         DataContext = _viewModel;
@@ -45,19 +47,23 @@ public partial class MainWindow : Window
             e.Handled = true;
         };
 
-        // Window monitor
+        _positioner = new BarPositioner(this, _settings);
+
+        // Window monitor. With space reserved, maximized windows stop at the
+        // bar, so there's nothing to hide from.
         _windowMonitor.MaximizedWindowStateChanged += isMaximized =>
         {
-            if (_settings.HideOnMaximized)
+            if (_settings.HideOnMaximized && !_settings.ReserveSpace)
                 Dispatcher.Invoke(() => Visibility = isMaximized ? Visibility.Hidden : Visibility.Visible);
         };
 
         // Settings changed subscription
         _settings.SettingsChanged += () =>
         {
-            _windowMonitor.Enabled = _settings.HideOnMaximized;
-            if (!_settings.HideOnMaximized)
+            _windowMonitor.Enabled = _settings.HideOnMaximized && !_settings.ReserveSpace;
+            if (!_windowMonitor.Enabled)
                 Visibility = Visibility.Visible;
+            _positioner.Apply();
         };
 
         Loaded += OnLoaded;
@@ -68,16 +74,18 @@ public partial class MainWindow : Window
         InputBindings.Add(new KeyBinding(_viewModel.GoUpCommand, Key.Up, ModifierKeys.Alt));
         InputBindings.Add(new KeyBinding(_viewModel.RefreshCommand, Key.F5, ModifierKeys.None));
 
+        // Drag anywhere; on release the bar snaps to the nearer edge of the
+        // monitor it's on and remembers the spot
         MouseLeftButtonDown += (_, _) =>
         {
             try { DragMove(); } catch { }
+            _positioner.OnDragged();
         };
     }
 
     private void OnLoaded(object sender, RoutedEventArgs e)
     {
-        Left = (SystemParameters.PrimaryScreenWidth - Width) / 2;
-        Top = 0;
+        _positioner.Attach();
 
         string startPath = Application.Current.Properties["StartPath"] as string
             ?? _desktopFolder.OriginalDesktop;
@@ -118,6 +126,7 @@ public partial class MainWindow : Window
     private void OnClosing(object? sender, System.ComponentModel.CancelEventArgs e)
     {
         _windowMonitor.Stop();
+        _positioner.Dispose(); // gives reserved space back
         _settings.Save();
         _desktopFolder.Dispose();
     }

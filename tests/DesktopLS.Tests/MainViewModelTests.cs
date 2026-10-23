@@ -112,5 +112,6 @@ public sealed class MainViewModelTests : IDisposable
     {
         public bool StartupEnabled { get; set; }
         public bool HideOnMaximized { get; set; } = true;
+        public bool ReserveSpace { get; set; }
     }
 }

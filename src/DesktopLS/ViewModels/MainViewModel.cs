@@ -90,6 +90,23 @@ public sealed class MainViewModel : INotifyPropertyChanged
         }
     }
 
+    public bool ReserveSpace
+    {
+        get => _settings.ReserveSpace;
+        set
+        {
+            if (_settings.ReserveSpace != value)
+            {
+                _settings.ReserveSpace = value;
+                OnPropertyChanged();
+                OnPropertyChanged(nameof(CanHideOnMaximized));
+            }
+        }
+    }
+
+    /// <summary>Hiding is pointless while space is reserved: maximized windows stop at the bar.</summary>
+    public bool CanHideOnMaximized => !_settings.ReserveSpace;
+
     public ObservableCollection<string> Suggestions { get; }
 
     public ICommand NavigateCommand { get; }

@@ -46,6 +46,37 @@ public sealed class SettingsService : ISettingsService
         }
     }
 
+    private bool _reserveSpace;
+    private BarPlacement _placement = new();
+
+    public bool ReserveSpace
+    {
+        get => _reserveSpace;
+        set
+        {
+            if (_reserveSpace != value)
+            {
+                _reserveSpace = value;
+                Save();
+                SettingsChanged?.Invoke();
+            }
+        }
+    }
+
+    /// <summary>Where the bar sits; saved when it changes (after a drag).</summary>
+    public BarPlacement Placement
+    {
+        get => _placement;
+        set
+        {
+            if (_placement != value)
+            {
+                _placement = value;
+                Save();
+            }
+        }
+    }
+
     public event Action? SettingsChanged;
 
     public void Load()
@@ -70,7 +101,14 @@ public sealed class SettingsService : ISettingsService
                 string json = File.ReadAllText(SettingsFile);
                 var data = JsonSerializer.Deserialize<SettingsData>(json);
                 if (data != null)
+                {
                     _hideOnMaximized = data.HideOnMaximized;
+                    _reserveSpace = data.ReserveSpace;
+                    _placement = new BarPlacement(
+                        Enum.TryParse(data.BarEdge, out BarEdge edge) ? edge : BarEdge.Top,
+                        double.IsFinite(data.BarX) ? Math.Clamp(data.BarX, 0, 1) : 0.5,
+                        string.IsNullOrEmpty(data.BarMonitor) ? null : data.BarMonitor);
+                }
             }
         }
         catch (Exception ex)
@@ -84,7 +122,14 @@ public sealed class SettingsService : ISettingsService
     {
         try
         {
-            var data = new SettingsData { HideOnMaximized = _hideOnMaximized };
+            var data = new SettingsData
+            {
+                HideOnMaximized = _hideOnMaximized,
+                ReserveSpace = _reserveSpace,
+                BarEdge = _placement.Edge.ToString(),
+                BarX = _placement.X,
+                BarMonitor = _placement.Monitor,
+            };
             string json = JsonSerializer.Serialize(data, new JsonSerializerOptions { WriteIndented = true });
             Directory.CreateDirectory(Path.GetDirectoryName(SettingsFile)!);
             AtomicFile.WriteAllText(SettingsFile, json);
@@ -135,5 +180,9 @@ public sealed class SettingsService : ISettingsService
     private class SettingsData
     {
         public bool HideOnMaximized { get; set; } = true;
+        public bool ReserveSpace { get; set; }
+        public string BarEdge { get; set; } = nameof(Services.BarEdge.Top);
+        public double BarX { get; set; } = 0.5;
+        public string? BarMonitor { get; set; }
     }
 }
