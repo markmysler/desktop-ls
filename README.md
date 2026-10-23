@@ -40,7 +40,9 @@ It never modifies the shared **Public Desktop** (`C:\Users\Public\Desktop`); its
 
 **If your desktop is ever stuck on another folder**, start DesktopLS once and close it.
 
-**To stop using the junction** (for example before uninstalling): close DesktopLS, then right-click your Desktop folder in File Explorer → **Properties** → **Location**, type your real desktop path (usually `C:\Users\<you>\Desktop`) → OK, and answer **No** when asked to move the files. Sign out and back in, then remove the junction with `rmdir "%LocalAppData%\DesktopLS\DesktopView"` (plain `rmdir` removes only the junction, never what it points at).
+**To stop using DesktopLS** (for example before uninstalling): open the ⋮ menu → **Stop using DesktopLS…**. It points your Desktop back at its real folder, turns off Run on startup, restarts Explorer once, removes the junction and closes. Uninstallers can run `DesktopLS.exe --undo-setup` for the same thing (add `--no-restart` to leave Explorer alone; the change then shows at the next sign-in). Your files and saved layouts are kept.
+
+By hand, if DesktopLS is gone: right-click your Desktop folder in File Explorer → **Properties** → **Location**, type your real desktop path (usually `C:\Users\<you>\Desktop`) → OK, and answer **No** when asked to move the files. Sign out and back in, then remove the junction with `rmdir "%LocalAppData%\DesktopLS\DesktopView"` (plain `rmdir` removes only the junction, never what it points at).
 
 ## Installation
 

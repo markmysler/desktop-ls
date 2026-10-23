@@ -164,6 +164,57 @@ public sealed class DesktopFolderService : IDesktopFolderService, IDisposable
     /// </summary>
     public void RestartExplorerForSetup()
     {
+        RestartExplorer();
+        TryDelete(SetupPendingFile);
+    }
+
+    /// <summary>
+    /// Undoes the setup: the Desktop points at the real desktop folder again
+    /// and, once Explorer has restarted, the junction is removed. Static so
+    /// an uninstaller can run it (DesktopLS.exe --undo-setup) without the
+    /// constructor setting everything up again. Never touches the files on
+    /// the desktop: the junction is only a link to them.
+    /// </summary>
+    /// <param name="restartExplorer">
+    /// Restart Explorer now so the change shows at once. Without it the
+    /// desktop switches at the next sign-in and the (harmless) junction stays.
+    /// </param>
+    public static void UndoSetup(bool restartExplorer)
+    {
+        string real = FindRealDesktop();
+
+        // Keep the desktop showing the real folder until Explorer lets go
+        if (Junction.GetTarget(JunctionPath) is { } target && !SamePath(target, real))
+            Junction.Point(JunctionPath, real);
+
+        if (SamePath(GetKnownFolderPath(), JunctionPath) && !TrySetKnownFolderPath(real))
+            throw new IOException($"Windows refused to move the Desktop back to {real}.");
+
+        if (restartExplorer)
+        {
+            RestartExplorer();
+            WaitForShell();
+            // Directory.Delete on a junction removes only the link, never
+            // the folder it points at; check it really is one first
+            try
+            {
+                if (Junction.GetTarget(JunctionPath) != null) Directory.Delete(JunctionPath, recursive: false);
+            }
+            catch (Exception ex) { Log.Error($"Removing {JunctionPath} failed", ex); }
+        }
+
+        TryDelete(RealDesktopFile);
+        TryDelete(SetupPendingFile);
+    }
+
+    private static void WaitForShell()
+    {
+        var sw = Stopwatch.StartNew();
+        while (sw.ElapsedMilliseconds < 15000 && DesktopIconManager.GetIconCount() == 0) Thread.Sleep(200);
+    }
+
+    private static void RestartExplorer()
+    {
         int session = Process.GetCurrentProcess().SessionId;
         var old = Process.GetProcessesByName("explorer").Where(p => p.SessionId == session).ToList();
         var oldIds = old.Select(p => p.Id).ToHashSet();
@@ -185,7 +236,6 @@ public sealed class DesktopFolderService : IDesktopFolderService, IDisposable
             string exe = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.Windows), "explorer.exe");
             Process.Start(new ProcessStartInfo(exe) { UseShellExecute = true })?.Dispose();
         }
-        TryDelete(SetupPendingFile);
     }
 
     /// <summary>

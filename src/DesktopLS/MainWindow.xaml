@@ -61,6 +61,15 @@
                         <CheckBox Content="Hide when window maximized"
                                   IsChecked="{Binding HideOnMaximized, Mode=TwoWay}"
                                   Foreground="{StaticResource TextBrush}"/>
+                        <Separator Margin="0,10" Background="{StaticResource BorderBrush}"/>
+                        <Button Content="Stop using DesktopLS…"
+                                Click="UndoSetup_Click"
+                                HorizontalAlignment="Left"
+                                Padding="6,3"
+                                Foreground="{StaticResource TextBrush}"
+                                Background="Transparent"
+                                BorderBrush="{StaticResource BorderBrush}"
+                                ToolTip="Put your Desktop back to normal and close DesktopLS"/>
                     </StackPanel>
                 </Border>
             </Popup>

@@ -30,6 +30,30 @@ public partial class App : Application
             return;
         }
 
+        // For uninstallers: put the Desktop back to normal and exit
+        // (--no-restart leaves Explorer alone; the change then shows at the next sign-in)
+        if (e.Args.Any(a => a.Equals("--undo-setup", StringComparison.OrdinalIgnoreCase)))
+        {
+            // No main window: creating it would set everything up again
+            StartupUri = null;
+            bool restart = !e.Args.Any(a => a.Equals("--no-restart", StringComparison.OrdinalIgnoreCase));
+            int exitCode = 0;
+            try
+            {
+                DesktopFolderService.UndoSetup(restart);
+                var settings = new SettingsService();
+                settings.Load();
+                settings.StartupEnabled = false;
+            }
+            catch (Exception ex)
+            {
+                Log.Error("Undoing the DesktopLS setup failed", ex);
+                exitCode = 1;
+            }
+            Shutdown(exitCode);
+            return;
+        }
+
         DispatcherUnhandledException += OnDispatcherUnhandledException;
         AppDomain.CurrentDomain.UnhandledException += (_, args) =>
         {

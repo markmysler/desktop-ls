@@ -89,6 +89,32 @@ public partial class MainWindow : Window
         PathBox.SelectAll();
     }
 
+    private void UndoSetup_Click(object sender, RoutedEventArgs e)
+    {
+        SettingsPopup.IsOpen = false;
+        if (MessageBox.Show(
+                "This points your Desktop back at its real folder, turns off Run on startup, restarts Windows Explorer once " +
+                "(the taskbar disappears for a few seconds and open File Explorer windows close), and closes DesktopLS.\n\n" +
+                "Your files and saved icon layouts are kept. Opening DesktopLS again sets it up again.\n\nContinue?",
+                "DesktopLS", MessageBoxButton.YesNo, MessageBoxImage.Question) != MessageBoxResult.Yes)
+            return;
+
+        try
+        {
+            _desktopFolder.Restore();             // show the real desktop first
+            _viewModel.StartupEnabled = false;
+            DesktopFolderService.UndoSetup(restartExplorer: true);
+        }
+        catch (Exception ex)
+        {
+            Log.Error("Undoing the DesktopLS setup failed", ex);
+            MessageBox.Show($"Couldn't put the Desktop back: {ex.Message}", "DesktopLS",
+                MessageBoxButton.OK, MessageBoxImage.Error);
+            return;
+        }
+        Close();
+    }
+
     private void OnClosing(object? sender, System.ComponentModel.CancelEventArgs e)
     {
         _windowMonitor.Stop();
