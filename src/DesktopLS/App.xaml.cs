@@ -40,7 +40,7 @@ public partial class App : Application
         // Optional folder to open; without one MainWindow starts on the user's
         // real desktop (resolved after crash recovery, not here)
         if (e.Args.Length > 0)
-            Properties["StartPath"] = e.Args[0];
+            Properties["StartPath"] = NormalizeStartArgument(e.Args[0]);
     }
 
     protected override void OnExit(ExitEventArgs e)
@@ -57,6 +57,17 @@ public partial class App : Application
             "DesktopLS", MessageBoxButton.OK, MessageBoxImage.Error);
         e.Handled = true;
         Shutdown(1);
+    }
+
+    /// <summary>
+    /// Windows command-line parsing turns a quoted path ending in a backslash
+    /// ("D:\") into D:" (the \" becomes a literal quote). Undo that.
+    /// </summary>
+    internal static string NormalizeStartArgument(string arg)
+    {
+        string path = arg.Trim().Trim('"').Trim();
+        if (path.Length == 2 && path[1] == ':') path += "\\";
+        return path;
     }
 
     private void RestoreDesktop()

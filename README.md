@@ -1,87 +1,86 @@
 # DesktopLS
 
-A lightweight Windows desktop navigation bar. Point your desktop at any folder on disk — browse, navigate back and forward, and switch between folders just like a file manager, all while keeping your icons arranged exactly where you left them.
+[![CI](https://github.com/markmysler/desktop-ls/actions/workflows/ci.yml/badge.svg)](https://github.com/markmysler/desktop-ls/actions/workflows/ci.yml)
+[![Latest release](https://img.shields.io/github/v/release/markmysler/desktop-ls)](https://github.com/markmysler/desktop-ls/releases/latest)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+
+A lightweight navigation bar for the Windows desktop. Point your desktop at any folder on disk, then browse, go back and forward, and switch between folders like a file manager, while each folder keeps its own icon arrangement.
+
+![DesktopLS bar with path autocomplete](docs/demo.gif)
 
 ## Features
 
-- **Redirect the desktop to any folder** — type a path (or use autocomplete) and press Enter; the desktop immediately shows that folder's contents
-- **Back / Forward / Up navigation** — full history stack with keyboard shortcuts (Alt+Left, Alt+Right, Alt+Up)
-- **Refresh** — re-applies the current folder (F5)
-- **Path autocomplete** — starts suggesting subdirectories as you type; press Tab to cycle through suggestions, Enter to navigate, or double-click to navigate immediately
-- **Settings menu** — click ⋮ button to configure run-on-startup and auto-hide behavior
-- **Auto-hide on maximize** (default: on) — toolbar automatically hides when another window is maximized on the primary monitor; can be disabled in settings
-- **Icon layout memory** — icon positions are saved per folder and per monitor configuration; switching folders restores exactly where you left your icons
-- **First-visit auto-grid** — icons in a folder you have never visited are placed in a tidy column-major grid across all monitors
-- **Public Desktop isolation** — items from `C:\Users\Public\Desktop` are hidden while browsing other folders and restored when you return to your original desktop
-- **Crash-safe** — the original desktop path is recorded before any redirect; if the process crashes, the next launch automatically restores it
-- **Zero dependencies** — the Release build is a single self-contained `.exe`; no .NET runtime installation required
+- **Show any folder on the desktop**: type a path (with autocomplete) and press Enter; the desktop shows that folder's contents
+- **Back / Forward / Up** with history (Alt+Left, Alt+Right, Alt+Up) and **Refresh** (F5)
+- **Path autocomplete**: subfolders are suggested as you type; Tab moves through the suggestions, Enter or double-click opens one
+- **Icon layout memory**: icon positions are saved per folder and per monitor setup, and restored when you come back
+- **First-visit grid**: a folder you've never opened gets its icons laid out in a tidy grid across all monitors
+- **Auto-hide** (on by default): the bar hides while another window is maximized
+- **Crash recovery**: your real desktop is recorded before any change and restored on exit, on errors, at log-off, and on the next start after a crash
+- **Single `.exe`**: the release build is self-contained; no .NET install needed
 
-## System requirements
+## What DesktopLS changes on your system
 
-- Windows 10 or Windows 11 (x64)
-- No additional software required for pre-built binaries
+DesktopLS changes Windows settings, so here is exactly what it touches and how to undo it.
+
+| What | Where | When it's undone |
+|---|---|---|
+| Your **Desktop folder location** | `HKCU\Software\Microsoft\Windows\CurrentVersion\Explorer\User Shell Folders` → `Desktop` (via `SHSetKnownFolderPath`) | When you close DesktopLS, when it crashes or Windows logs off, or at the latest the next time it starts |
+| A recovery file holding your real desktop path | `%LocalAppData%\DesktopLS\desktop_original.txt` | Deleted once the desktop is restored |
+| Saved icon layouts and settings | `%LocalAppData%\DesktopLS\layouts.json`, `settings.json` | Kept; delete the folder to reset |
+| "Run on startup" (only if you enable it) | `HKCU\Software\Microsoft\Windows\CurrentVersion\Run` → `DesktopLS` | Removed when you turn the setting off |
+
+It never modifies the shared **Public Desktop** (`C:\Users\Public\Desktop`); its shortcuts stay visible on any folder you open. (Version 1.0.0 did move them; starting a newer version puts back anything it left behind.)
+
+**If your desktop is ever stuck on another folder**, start DesktopLS once and close it, or fix it by hand: right-click your Desktop folder in File Explorer → **Properties** → **Location** → **Restore Default** → OK.
 
 ## Installation
 
-### Option 1 — winget (recommended)
+**Download:** get `DesktopLS.exe` from the [latest release](https://github.com/markmysler/desktop-ls/releases/latest), put it anywhere (for example `%LocalAppData%\Programs\DesktopLS`), and run it. Windows 10 or 11, x64.
 
-```
-winget install MarkMysler.DesktopLS
-```
+To start it with Windows, open the ⋮ menu and enable **Run on startup**.
 
-### Option 2 — Download pre-built binary
+A winget package is planned but not published yet.
 
-1. Go to [Releases](../../releases) and download `DesktopLS.exe` from the latest release
-2. Place it anywhere (e.g. `%LocalAppData%\DesktopLS\DesktopLS.exe`)
-3. Double-click to run — no installer needed
-4. To run on startup, open the app and enable "Run on startup" in Settings (⋮ button)
+**Build from source** (needs the [.NET 8 SDK](https://dotnet.microsoft.com/download/dotnet/8.0)):
 
-### Option 3 — Build from source
-
-**Prerequisites:**
-- [.NET 8 SDK](https://dotnet.microsoft.com/download/dotnet/8.0)
-- Windows 10/11 x64
-
-**Clone and run (debug build):**
 ```
 git clone https://github.com/markmysler/desktop-ls.git
 cd desktop-ls
 dotnet run --project src/DesktopLS/DesktopLS.csproj
 ```
 
-**Publish self-contained single executable:**
-```
-dotnet publish src/DesktopLS/DesktopLS.csproj -c Release
-```
-
-The output is at:
-```
-src/DesktopLS/bin/Release/net8.0-windows/win-x64/publish/DesktopLS.exe
-```
+Single-file release build: `dotnet publish src/DesktopLS/DesktopLS.csproj -c Release`, output in `src/DesktopLS/bin/Release/net8.0-windows/win-x64/publish/`.
 
 ## Usage
 
 | Action | How |
 |---|---|
-| Navigate to a folder | Type a path in the bar and press Enter |
-| Autocomplete | Start typing — press Tab to cycle through suggestions, Enter to select and navigate |
-| Back / Forward | Buttons or Alt+Left / Alt+Right |
-| Go up one level | Button or Alt+Up |
-| Refresh | Click ↻ or press F5 |
-| Open settings | Click ⋮ button |
-| Toggle run on startup | Settings → Run on startup |
-| Toggle auto-hide | Settings → Hide when window maximized |
-| Close (restore original desktop) | Click ✕ |
+| Open a folder | Type a path and press Enter (or pass it as an argument: `DesktopLS.exe "D:\Projects"`) |
+| Autocomplete | Type; **Tab** moves through suggestions, **Enter** opens the selected one, **Esc** closes the list |
+| Back / Forward | ← → buttons, or Alt+Left / Alt+Right |
+| Up one level | ↑ button or Alt+Up |
+| Refresh | ↻ button or F5 |
+| Settings | ⋮ button (run on startup, hide when a window is maximized) |
+| Close and restore your desktop | ✕ button |
 
-**Keyboard shortcuts in autocomplete:**
-- **Tab** — cycle through suggestions (fills path bar with each suggestion)
-- **Enter** — navigate to the currently selected/shown suggestion
-- **Escape** — close autocomplete dropdown
+If a folder can't be opened (deleted, no access), the bar says so instead of changing anything.
 
 ## How it works
 
-DesktopLS calls `SHSetKnownFolderPath` to redirect the `FOLDERID_Desktop` known folder to the target path. Windows Explorer immediately shows the new folder's contents. Icon positions are read and written via cross-process `LVM_GETITEMPOSITION` / `LVM_SETITEMPOSITION32` messages sent to Explorer's `SysListView32` window. Layouts are stored as JSON in `%LocalAppData%\DesktopLS\layouts.json`, keyed by path and monitor configuration.
+- **Redirecting the desktop:** `SHSetKnownFolderPath(FOLDERID_Desktop, …)`, followed by `SHChangeNotify` so Explorer refreshes. The original path is saved first so every exit path can restore it.
+- **Icon positions:** Explorer's desktop is a `SysListView32` control in another process. DesktopLS allocates a buffer inside Explorer (`VirtualAllocEx`), sends `LVM_GETITEMW` / `LVM_GETITEMPOSITION` / `LVM_SETITEMPOSITION32`, and reads the results back with `ReadProcessMemory`. Layouts are stored in `layouts.json`, keyed by folder and monitor configuration.
+- **Auto-hide:** checks the foreground windows for a maximized one every 500 ms.
+
+## Development
+
+```
+dotnet build DesktopLS.sln
+dotnet test DesktopLS.sln
+```
+
+CI builds and tests every push. Pushing a `v*` tag publishes the single-file `DesktopLS.exe` to a GitHub release.
 
 ## License
 
-MIT
+[MIT](LICENSE)
