@@ -6,7 +6,7 @@ using System.Windows.Interop;
 namespace DesktopLS.Services;
 
 /// <summary>
-/// Monitors for maximized windows on the primary monitor.
+/// Monitors for maximized or full-screen windows on the bar's monitor.
 /// Raises event when a maximized window appears or disappears.
 /// </summary>
 public sealed class WindowMonitorService : IDisposable
@@ -51,7 +51,7 @@ public sealed class WindowMonitorService : IDisposable
 
         try
         {
-            bool hasMaximized = HasMaximizedWindowOnPrimaryMonitor();
+            bool hasMaximized = HasMaximizedWindowOnBarMonitor();
             if (hasMaximized != _lastMaximizedState)
             {
                 _lastMaximizedState = hasMaximized;
@@ -64,59 +64,68 @@ public sealed class WindowMonitorService : IDisposable
         }
     }
 
-    private bool HasMaximizedWindowOnPrimaryMonitor()
+    /// <summary>
+    /// True if a visible window is maximized or full screen on the monitor the
+    /// bar is on. Everything is compared in physical pixels via monitor
+    /// handles, so it works at any display scaling.
+    /// </summary>
+    private bool HasMaximizedWindowOnBarMonitor()
     {
-        var primaryBounds = GetPrimaryMonitorBounds();
+        IntPtr barMonitor = MonitorFromWindow(_ownerHwnd, MONITOR_DEFAULTTOPRIMARY);
+        var mi = new MONITORINFO { cbSize = Marshal.SizeOf<MONITORINFO>() };
+        if (!GetMonitorInfo(barMonitor, ref mi)) return false;
+        uint ownPid = (uint)Environment.ProcessId;
         bool found = false;
 
         EnumWindows((hWnd, lParam) =>
         {
-            // Skip our own window
-            if (hWnd == _ownerHwnd)
+            if (!IsWindowVisible(hWnd) || IsCloaked(hWnd))
                 return true;
 
-            // Only check visible windows
-            if (!IsWindowVisible(hWnd))
+            // Skip our own windows (bar, popups) and the shell's desktop/taskbar
+            GetWindowThreadProcessId(hWnd, out uint pid);
+            if (pid == ownPid || IsShellWindow(hWnd))
                 return true;
 
-            // Check if maximized
+            if (MonitorFromWindow(hWnd, MONITOR_DEFAULTTONULL) != barMonitor)
+                return true;
+
             var placement = new WINDOWPLACEMENT { length = Marshal.SizeOf<WINDOWPLACEMENT>() };
-            if (!GetWindowPlacement(hWnd, ref placement))
-                return true;
+            bool maximized = GetWindowPlacement(hWnd, ref placement) && placement.showCmd == SW_SHOWMAXIMIZED;
 
-            if (placement.showCmd != SW_SHOWMAXIMIZED)
-                return true;
-
-            // Check if on primary monitor
-            if (GetWindowRect(hWnd, out RECT rect))
+            if (maximized || IsFullScreen(hWnd, mi.rcMonitor))
             {
-                // Window is on primary if its center is within primary monitor bounds
-                int centerX = (rect.Left + rect.Right) / 2;
-                int centerY = (rect.Top + rect.Bottom) / 2;
-
-                if (centerX >= primaryBounds.Left && centerX < primaryBounds.Right &&
-                    centerY >= primaryBounds.Top && centerY < primaryBounds.Bottom)
-                {
-                    found = true;
-                    return false; // Stop enumeration
-                }
+                found = true;
+                return false; // Stop enumeration
             }
-
             return true;
         }, IntPtr.Zero);
 
         return found;
     }
 
-    private static RECT GetPrimaryMonitorBounds()
+    /// <summary>A borderless window covering the whole monitor (games, video players).</summary>
+    private static bool IsFullScreen(IntPtr hWnd, RECT monitor)
     {
-        return new RECT
-        {
-            Left = 0,
-            Top = 0,
-            Right = (int)SystemParameters.PrimaryScreenWidth,
-            Bottom = (int)SystemParameters.PrimaryScreenHeight
-        };
+        int exStyle = GetWindowLong(hWnd, GWL_EXSTYLE);
+        // Overlays (tool windows, click-through layers) often span the screen too
+        if ((exStyle & (WS_EX_TOOLWINDOW | WS_EX_TRANSPARENT | WS_EX_NOACTIVATE)) != 0)
+            return false;
+        return GetWindowRect(hWnd, out RECT r) &&
+               r.Left <= monitor.Left && r.Top <= monitor.Top &&
+               r.Right >= monitor.Right && r.Bottom >= monitor.Bottom;
+    }
+
+    /// <summary>Windows on another virtual desktop or suspended UWP apps are "cloaked".</summary>
+    private static bool IsCloaked(IntPtr hWnd)
+        => DwmGetWindowAttribute(hWnd, DWMWA_CLOAKED, out int cloaked, sizeof(int)) == 0 && cloaked != 0;
+
+    private static bool IsShellWindow(IntPtr hWnd)
+    {
+        var name = new System.Text.StringBuilder(32);
+        GetClassName(hWnd, name, name.Capacity);
+        string cls = name.ToString();
+        return cls is "Progman" or "WorkerW" or "Shell_TrayWnd" or "Shell_SecondaryTrayWnd";
     }
 
     // P/Invoke declarations
@@ -134,6 +143,33 @@ public sealed class WindowMonitorService : IDisposable
 
     [DllImport("user32.dll")]
     private static extern bool GetWindowRect(IntPtr hWnd, out RECT lpRect);
+
+    [DllImport("user32.dll")]
+    private static extern IntPtr MonitorFromWindow(IntPtr hwnd, uint dwFlags);
+
+    [DllImport("user32.dll", CharSet = CharSet.Auto)]
+    private static extern bool GetMonitorInfo(IntPtr hMonitor, ref MONITORINFO lpmi);
+
+    [DllImport("user32.dll")]
+    private static extern uint GetWindowThreadProcessId(IntPtr hWnd, out uint lpdwProcessId);
+
+    [DllImport("user32.dll")]
+    private static extern int GetWindowLong(IntPtr hWnd, int nIndex);
+
+    [DllImport("user32.dll", CharSet = CharSet.Unicode)]
+    private static extern int GetClassName(IntPtr hWnd, System.Text.StringBuilder lpClassName, int nMaxCount);
+
+    [DllImport("dwmapi.dll")]
+    private static extern int DwmGetWindowAttribute(IntPtr hwnd, int dwAttribute, out int pvAttribute, int cbAttribute);
+
+    [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Auto)]
+    private struct MONITORINFO
+    {
+        public int cbSize;
+        public RECT rcMonitor;
+        public RECT rcWork;
+        public uint dwFlags;
+    }
 
     [StructLayout(LayoutKind.Sequential)]
     private struct WINDOWPLACEMENT
@@ -163,4 +199,11 @@ public sealed class WindowMonitorService : IDisposable
     }
 
     private const int SW_SHOWMAXIMIZED = 3;
+    private const uint MONITOR_DEFAULTTONULL = 0;
+    private const uint MONITOR_DEFAULTTOPRIMARY = 1;
+    private const int GWL_EXSTYLE = -20;
+    private const int WS_EX_TOOLWINDOW = 0x00000080;
+    private const int WS_EX_TRANSPARENT = 0x00000020;
+    private const int WS_EX_NOACTIVATE = 0x08000000;
+    private const int DWMWA_CLOAKED = 14;
 }

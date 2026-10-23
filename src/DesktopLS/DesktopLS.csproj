@@ -11,6 +11,7 @@
     <Nullable>enable</Nullable>
     <ImplicitUsings>enable</ImplicitUsings>
     <ApplicationIcon>Resources\app.ico</ApplicationIcon>
+    <ApplicationManifest>app.manifest</ApplicationManifest>
     <StartupObject>DesktopLS.App</StartupObject>
     <RootNamespace>DesktopLS</RootNamespace>
     <AssemblyName>DesktopLS</AssemblyName>
