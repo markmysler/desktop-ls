@@ -5,9 +5,9 @@ namespace DesktopLS.Services;
 
 /// <summary>
 /// Redirects the Windows Explorer Desktop to an arbitrary folder.
-/// Uses SHSetKnownFolderPath for the user desktop and stashes the
-/// Public Desktop contents (C:\Users\Public\Desktop) so no merged
-/// shortcuts bleed through.
+/// Uses SHSetKnownFolderPath for the user desktop. Shortcuts on the shared
+/// Public Desktop (C:\Users\Public\Desktop) stay visible: that folder belongs
+/// to every user on the PC, so DesktopLS never modifies it.
 /// Saves and restores desktop icon positions per folder.
 /// </summary>
 public sealed class DesktopFolderService : IDisposable
@@ -37,6 +37,8 @@ public sealed class DesktopFolderService : IDisposable
         Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "DesktopLS");
 
     private static readonly string UserStateFile = Path.Combine(AppDataDir, "desktop_original.txt");
+
+    // Only used to recover items that version 1.0.0 moved off the Public Desktop
     private static readonly string PublicStashDir = Path.Combine(AppDataDir, "public_stash");
 
     private static readonly string PublicDesktopPath =
@@ -45,7 +47,6 @@ public sealed class DesktopFolderService : IDisposable
     private readonly string _originalUserDesktop;
     private readonly IconLayoutService _iconLayouts = new();
     private bool _disposed;
-    private bool _publicStashed;
     private bool _crashStateWritten;
     private string? _currentRedirectedPath;
 
@@ -66,8 +67,9 @@ public sealed class DesktopFolderService : IDisposable
             finally { TryDelete(UserStateFile); }
         }
 
-        // Crash recovery: restore public desktop stash if left behind
-        RestorePublicDesktop();
+        // Version 1.0.0 moved Public Desktop items into a stash; put back
+        // anything such a version left behind
+        RestoreLegacyPublicStash();
 
         _originalUserDesktop = GetKnownFolderPath();
     }
@@ -96,19 +98,6 @@ public sealed class DesktopFolderService : IDisposable
             _crashStateWritten = true;
         }
 
-        // Stash/restore Public Desktop BEFORE redirect so items vanish
-        // before the new folder appears (no lingering icons).
-        if (!goingToOriginal && !_publicStashed)
-        {
-            StashPublicDesktop();
-            _publicStashed = true;
-        }
-        else if (goingToOriginal && _publicStashed)
-        {
-            RestorePublicDesktop();
-            _publicStashed = false;
-        }
-
         SetKnownFolderPath(path);
         _currentRedirectedPath = path;
 
@@ -133,19 +122,13 @@ public sealed class DesktopFolderService : IDisposable
 
         _iconLayouts.SaveLayout(_currentRedirectedPath);
 
-        if (_publicStashed)
-        {
-            RestorePublicDesktop();
-            _publicStashed = false;
-        }
-
         SetKnownFolderPath(_originalUserDesktop);
         _currentRedirectedPath = null;
         _crashStateWritten = false;
 
         TryDelete(UserStateFile);
 
-        // Restore original desktop icon positions after public items are back
+        // Restore original desktop icon positions
         if (_iconLayouts.HasLayout(_originalUserDesktop))
         {
             string origPath = _originalUserDesktop;
@@ -202,67 +185,35 @@ public sealed class DesktopFolderService : IDisposable
         SHChangeNotify(SHCNE_ASSOCCHANGED, SHCNF_IDLIST | SHCNF_FLUSH, IntPtr.Zero, IntPtr.Zero);
     }
 
-    // ── Public Desktop stash ─────────────────────────────────────────────
+    // ── Legacy Public Desktop stash ──────────────────────────────────────
 
-    private void StashPublicDesktop()
+    /// <summary>
+    /// Moves items left in the old stash folder back to the Public Desktop.
+    /// Never overwrites or deletes: anything whose name already exists on the
+    /// Public Desktop stays in the stash for the user to resolve.
+    /// </summary>
+    private static void RestoreLegacyPublicStash()
     {
-        try
+        if (!Directory.Exists(PublicStashDir)) return;
+
+        foreach (var item in Directory.GetFileSystemEntries(PublicStashDir))
         {
-            if (!Directory.Exists(PublicDesktopPath)) return;
-
-            // Build set of names already in the user's desktop so we skip duplicates
-            var userNames = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-            if (Directory.Exists(_originalUserDesktop))
+            string dest = Path.Combine(PublicDesktopPath, Path.GetFileName(item));
+            if (File.Exists(dest) || Directory.Exists(dest)) continue;
+            try
             {
-                foreach (var e in Directory.GetFileSystemEntries(_originalUserDesktop))
-                    userNames.Add(Path.GetFileName(e));
+                if (File.Exists(item)) File.Move(item, dest);
+                else if (Directory.Exists(item)) Directory.Move(item, dest);
             }
-
-            Directory.CreateDirectory(PublicStashDir);
-
-            foreach (var item in Directory.GetFileSystemEntries(PublicDesktopPath))
-            {
-                string name = Path.GetFileName(item);
-                if (name.Equals("desktop.ini", StringComparison.OrdinalIgnoreCase)) continue;
-                if (userNames.Contains(name)) continue; // already present in user desktop
-
-                string dest = Path.Combine(PublicStashDir, name);
-                if (File.Exists(item))
-                    File.Move(item, dest, overwrite: true);
-                else if (Directory.Exists(item))
-                    MoveDirectory(item, dest);
-            }
+            catch { /* Public Desktop usually needs admin rights; leave the item stashed */ }
         }
-        catch { /* best effort — public desktop may be inaccessible */ }
-    }
 
-    private static void RestorePublicDesktop()
-    {
         try
         {
-            if (!Directory.Exists(PublicStashDir)) return;
-
-            foreach (var item in Directory.GetFileSystemEntries(PublicStashDir))
-            {
-                string name = Path.GetFileName(item);
-                string dest = Path.Combine(PublicDesktopPath, name);
-                if (File.Exists(item))
-                    File.Move(item, dest, overwrite: true);
-                else if (Directory.Exists(item))
-                    MoveDirectory(item, dest);
-            }
-
-            // Remove stash dir if empty
-            if (!Directory.GetFileSystemEntries(PublicStashDir).Any())
+            if (!Directory.EnumerateFileSystemEntries(PublicStashDir).Any())
                 Directory.Delete(PublicStashDir);
         }
-        catch { /* best effort */ }
-    }
-
-    private static void MoveDirectory(string source, string dest)
-    {
-        if (Directory.Exists(dest)) Directory.Delete(dest, recursive: true);
-        Directory.Move(source, dest);
+        catch { }
     }
 
     private static void TryDelete(string path)
