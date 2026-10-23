@@ -1,16 +1,29 @@
+using System.Diagnostics;
 using System.IO;
 using System.Runtime.InteropServices;
+using DesktopLS.Native;
 
 namespace DesktopLS.Services;
 
 /// <summary>
-/// Redirects the Windows Explorer Desktop to an arbitrary folder.
-/// Uses SHSetKnownFolderPath for the user desktop and stashes the
-/// Public Desktop contents (C:\Users\Public\Desktop) so no merged
-/// shortcuts bleed through.
+/// Shows an arbitrary folder on the Windows desktop.
+///
+/// The Desktop known folder points at a junction DesktopLS owns
+/// (%LOCALAPPDATA%\DesktopLS\DesktopView). Switching folders retargets that
+/// junction and asks Explorer to refresh it. On Windows 11 25H2 the Explorer
+/// that Windows starts reads the Desktop location only at startup and
+/// ignores every notification that it changed, so pointing the Desktop
+/// somewhere new on each switch isn't reliable; refreshing the same path
+/// with new contents is. While DesktopLS isn't switching, the junction
+/// points at the user's real desktop, so the desktop looks and works as usual.
+///
+/// Setting this up needs Explorer to restart once (or a sign-out).
+/// Shortcuts on the shared Public Desktop (C:\Users\Public\Desktop) stay
+/// visible: that folder belongs to every user on the PC, so DesktopLS never
+/// modifies it.
 /// Saves and restores desktop icon positions per folder.
 /// </summary>
-public sealed class DesktopFolderService : IDisposable
+public sealed class DesktopFolderService : IDesktopFolderService, IDisposable
 {
     private static readonly Guid FOLDERID_Desktop = new("B4BFCC3A-DB2C-424C-B029-7FE99A87C641");
 
@@ -23,59 +36,219 @@ public sealed class DesktopFolderService : IDisposable
     private static extern int SHGetKnownFolderPath(
         ref Guid rfid, uint dwFlags, IntPtr hToken, out IntPtr ppszPath);
 
-    [DllImport("shell32.dll")]
-    private static extern void SHChangeNotify(int wEventId, uint uFlags, IntPtr dwItem1, IntPtr dwItem2);
+    [DllImport("shell32.dll", CharSet = CharSet.Unicode)]
+    private static extern void SHChangeNotify(int wEventId, uint uFlags, string dwItem1, IntPtr dwItem2);
 
     [DllImport("ole32.dll")]
     private static extern void CoTaskMemFree(IntPtr pv);
 
-    private const int SHCNE_ASSOCCHANGED = 0x08000000;
-    private const uint SHCNF_IDLIST = 0x0000;
+    private const int SHCNE_UPDATEDIR = 0x00001000;
+    private const uint SHCNF_PATHW = 0x0005;
     private const uint SHCNF_FLUSH = 0x1000;
 
     private static readonly string AppDataDir = Path.Combine(
         Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "DesktopLS");
 
-    private static readonly string UserStateFile = Path.Combine(AppDataDir, "desktop_original.txt");
+    /// <summary>The junction the Desktop known folder points at.</summary>
+    public static readonly string JunctionPath = Path.Combine(AppDataDir, "DesktopView");
+
+    // The user's real desktop folder (where the junction points when idle)
+    private static readonly string RealDesktopFile = Path.Combine(AppDataDir, "desktop_real.txt");
+
+    // Left by a development build that tracked the pending Explorer restart
+    // in a file; now Explorer is asked directly (NeedsExplorerRestart)
+    private static readonly string SetupPendingFile = Path.Combine(AppDataDir, "setup_pending.txt");
+
+    // Earlier versions redirected the Desktop itself and kept the real one here
+    private static readonly string LegacyStateFile = Path.Combine(AppDataDir, "desktop_original.txt");
+
+    // Only used to recover items that version 1.0.0 moved off the Public Desktop
     private static readonly string PublicStashDir = Path.Combine(AppDataDir, "public_stash");
 
     private static readonly string PublicDesktopPath =
         Environment.GetFolderPath(Environment.SpecialFolder.CommonDesktopDirectory);
 
-    private readonly string _originalUserDesktop;
+    private readonly string _realDesktop;
     private readonly IconLayoutService _iconLayouts = new();
     private bool _disposed;
-    private bool _publicStashed;
-    private bool _crashStateWritten;
-    private string? _currentRedirectedPath;
+    private readonly SemaphoreSlim _layoutGate = new(1, 1);
+    private CancellationTokenSource? _layoutCts;
+    private Task? _pendingLayoutRestore;
+    private string _shownPath;
+
+    // Drawing of the desktop icons is locked during a switch (see
+    // DesktopIconManager.LockDrawing). The lock belongs to the UI thread, so
+    // restores hand the unlock back to it; the generation makes sure an older
+    // switch's unlock can't end a newer switch's lock.
+    private readonly SynchronizationContext? _ui = SynchronizationContext.Current;
+    private int _lockGeneration;
+    private bool _drawingLocked;
 
     public DesktopFolderService()
     {
         Directory.CreateDirectory(AppDataDir);
 
-        // Crash recovery: restore user desktop if state file left behind
-        if (File.Exists(UserStateFile))
+        // Version 1.0.0 moved Public Desktop items into a stash; put back
+        // anything such a version left behind
+        RestoreLegacyPublicStash();
+
+        _realDesktop = FindRealDesktop();
+        AtomicFile.WriteAllText(RealDesktopFile, _realDesktop);
+        _shownPath = _realDesktop;
+
+        // Crash recovery: the junction may still point at the folder a
+        // previous run was showing. Put the real desktop back.
+        string? target = Junction.GetTarget(JunctionPath);
+        bool wasElsewhere = target != null && !SamePath(target, _realDesktop);
+        if (wasElsewhere)
+        {
+            var namesBefore = DesktopIconManager.ReadNames();
+            int lockGen = LockDrawingFor(_realDesktop, arrangeIfNew: false);
+            Junction.Point(JunctionPath, _realDesktop);
+            RefreshJunction();
+            _pendingLayoutRestore = StartLayoutRestore(_realDesktop, namesBefore, arrangeIfNew: false, lockGen);
+        }
+        else
+        {
+            Junction.Point(JunctionPath, _realDesktop);
+        }
+
+        // Point the Desktop at the junction (once; it stays there)
+        if (!SamePath(GetKnownFolderPath(), JunctionPath))
+        {
+            if (!TrySetKnownFolderPath(JunctionPath))
+                throw new IOException("Windows refused to move the Desktop to DesktopLS's folder.");
+        }
+        TryDelete(LegacyStateFile);
+        TryDelete(SetupPendingFile);
+    }
+
+    /// <summary>The user's real desktop folder.</summary>
+    public string OriginalDesktop => _realDesktop;
+
+    public string CurrentPath => _shownPath;
+
+    /// <summary>
+    /// True while Explorer's desktop isn't showing the junction: it started
+    /// before setup, or it resolved the junction to the folder behind it. The
+    /// desktop can't switch folders until Explorer restarts. Asked from
+    /// Explorer itself; false if it can't be asked (switching then simply
+    /// doesn't show, and icons are left alone).
+    /// </summary>
+    public bool NeedsExplorerRestart
+    {
+        get
+        {
+            string? shown = ShellDesktopView.GetShownFolderPath();
+            return shown != null && !SamePath(shown, JunctionPath);
+        }
+    }
+
+    /// <summary>
+    /// Restarts Explorer so it shows the desktop through the junction. Only
+    /// needed once, right after setup. Open File Explorer windows close.
+    /// </summary>
+    public void RestartExplorerForSetup()
+    {
+        RestartExplorer();
+        WaitForShell();
+        if (NeedsExplorerRestart)
+            Log.Error("Explorer still doesn't show the desktop through DesktopLS's junction after restarting");
+    }
+
+    /// <summary>
+    /// Undoes the setup: the Desktop points at the real desktop folder again
+    /// and, once Explorer has restarted, the junction is removed. Static so
+    /// an uninstaller can run it (DesktopLS.exe --undo-setup) without the
+    /// constructor setting everything up again. Never touches the files on
+    /// the desktop: the junction is only a link to them.
+    /// </summary>
+    /// <param name="restartExplorer">
+    /// Restart Explorer now so the change shows at once. Without it the
+    /// desktop switches at the next sign-in and the (harmless) junction stays.
+    /// </param>
+    public static void UndoSetup(bool restartExplorer)
+    {
+        string real = FindRealDesktop();
+
+        // Keep the desktop showing the real folder until Explorer lets go
+        if (Junction.GetTarget(JunctionPath) is { } target && !SamePath(target, real))
+            Junction.Point(JunctionPath, real);
+
+        if (SamePath(GetKnownFolderPath(), JunctionPath) && !TrySetKnownFolderPath(real))
+            throw new IOException($"Windows refused to move the Desktop back to {real}.");
+
+        if (restartExplorer)
+        {
+            RestartExplorer();
+            WaitForShell();
+            // Directory.Delete on a junction removes only the link, never
+            // the folder it points at; check it really is one first
+            try
+            {
+                if (Junction.GetTarget(JunctionPath) != null) Directory.Delete(JunctionPath, recursive: false);
+            }
+            catch (Exception ex) { Log.Error($"Removing {JunctionPath} failed", ex); }
+        }
+
+        TryDelete(RealDesktopFile);
+        TryDelete(SetupPendingFile);
+    }
+
+    private static void WaitForShell()
+    {
+        var sw = Stopwatch.StartNew();
+        while (sw.ElapsedMilliseconds < 15000 && DesktopIconManager.GetIconCount() == 0) Thread.Sleep(200);
+    }
+
+    [DllImport("user32.dll", CharSet = CharSet.Unicode)]
+    private static extern IntPtr FindWindow(string lpClassName, string? lpWindowName);
+
+    [DllImport("user32.dll")]
+    private static extern bool PostMessage(IntPtr hWnd, uint msg, IntPtr wParam, IntPtr lParam);
+
+    // Explorer's own "Exit Explorer" command (Ctrl+Shift+right-click on the taskbar)
+    private const uint WM_USER_EXIT_EXPLORER = 0x0400 + 436;
+
+    /// <summary>
+    /// Closes Explorer cleanly and starts it again. A clean exit matters: when
+    /// Explorer is killed, Windows restarts it by itself, and such an Explorer
+    /// was seen to resolve the junction to the folder behind it, which makes
+    /// the desktop impossible to switch. An Explorer started directly shows
+    /// the junction itself.
+    /// </summary>
+    private static void RestartExplorer()
+    {
+        int session = Process.GetCurrentProcess().SessionId;
+        var old = Process.GetProcessesByName("explorer").Where(p => p.SessionId == session).ToList();
+        var oldIds = old.Select(p => p.Id).ToHashSet();
+
+        IntPtr tray = FindWindow("Shell_TrayWnd", null);
+        if (tray != IntPtr.Zero) PostMessage(tray, WM_USER_EXIT_EXPLORER, IntPtr.Zero, IntPtr.Zero);
+        foreach (var p in old)
         {
             try
             {
-                string saved = File.ReadAllText(UserStateFile).Trim();
-                if (!string.IsNullOrEmpty(saved) && Directory.Exists(saved))
-                    SetKnownFolderPath(saved);
+                // Only if the clean exit didn't happen
+                if (!p.WaitForExit(5000)) { p.Kill(); p.WaitForExit(3000); }
             }
-            catch { }
-            finally { TryDelete(UserStateFile); }
+            catch (Exception ex) { Log.Error($"Stopping explorer.exe ({p.Id}) failed", ex); }
+            finally { p.Dispose(); }
         }
 
-        // Crash recovery: restore public desktop stash if left behind
-        RestorePublicDesktop();
-
-        _originalUserDesktop = GetKnownFolderPath();
+        // After a kill Windows may start one itself; a second explorer.exe
+        // would only open a File Explorer window, so wait briefly first
+        var sw = Stopwatch.StartNew();
+        while (sw.ElapsedMilliseconds < 1000 && !NewExplorerRunning(session, oldIds)) Thread.Sleep(100);
+        if (!NewExplorerRunning(session, oldIds))
+        {
+            string exe = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.Windows), "explorer.exe");
+            Process.Start(new ProcessStartInfo(exe) { UseShellExecute = true })?.Dispose();
+        }
     }
 
-    public string? CurrentPath => _currentRedirectedPath;
-
     /// <summary>
-    /// Redirects the Windows desktop to show the given folder's contents.
+    /// Shows the given folder's contents on the desktop.
     /// </summary>
     public void SetDesktopPath(string path)
     {
@@ -84,77 +257,73 @@ public sealed class DesktopFolderService : IDisposable
         if (!Directory.Exists(path))
             throw new ArgumentException($"Directory does not exist: {path}", nameof(path));
 
-        bool goingToOriginal = string.Equals(path, _originalUserDesktop, StringComparison.OrdinalIgnoreCase);
+        // One spelling per folder ("C:\x/y" -> "C:\x\y"); switching to the
+        // folder already shown has nothing to do
+        path = IconLayoutService.NormalizePath(path);
+        if (SamePath(path, _shownPath)) return;
 
-        // Save current layout before switching
-        _iconLayouts.SaveLayout(_currentRedirectedPath ?? _originalUserDesktop);
+        if (IsNetworkPath(path))
+            throw new ArgumentException("Network folders can't be shown on the desktop (Windows junctions only reach local drives).");
+        if (SamePath(path, JunctionPath) || IsInside(path, AppDataDir))
+            throw new ArgumentException("That's DesktopLS's own folder.");
+        if (NeedsExplorerRestart)
+            throw new InvalidOperationException("Explorer has to restart once before DesktopLS can switch folders: reopen DesktopLS and choose Yes, or sign out and back in.");
 
-        // Write crash-recovery state on first redirect away from original
-        if (!goingToOriginal && !_crashStateWritten)
+        // Stop any layout restore still running for the previous folder, then
+        // save the current layout (it must be captured before the switch)
+        CancelPendingLayoutRestore();
+        _iconLayouts.SaveLayout(_shownPath);
+        var namesBefore = DesktopIconManager.ReadNames();
+
+        // Restore saved layout (or auto-arrange grid for first visit) once
+        // Explorer shows the new folder; nothing is drawn until then
+        bool arrangeIfNew = !SamePath(path, _realDesktop);
+        int lockGen = LockDrawingFor(path, arrangeIfNew);
+        try
         {
-            File.WriteAllText(UserStateFile, _originalUserDesktop);
-            _crashStateWritten = true;
+            Junction.Point(JunctionPath, path);
         }
-
-        // Stash/restore Public Desktop BEFORE redirect so items vanish
-        // before the new folder appears (no lingering icons).
-        if (!goingToOriginal && !_publicStashed)
+        catch
         {
-            StashPublicDesktop();
-            _publicStashed = true;
+            UnlockDrawing(lockGen);
+            throw;
         }
-        else if (goingToOriginal && _publicStashed)
-        {
-            RestorePublicDesktop();
-            _publicStashed = false;
-        }
-
-        SetKnownFolderPath(path);
-        _currentRedirectedPath = path;
-
-        // Restore saved layout (or auto-arrange grid for first visit)
-        string snapshotPath = path;
-        bool hasLayout = _iconLayouts.HasLayout(path);
-        int expectedCount = hasLayout ? _iconLayouts.GetSavedCount(path) : 1;
-        _ = Task.Run(async () =>
-        {
-            await WaitForIconsAsync(expectedCount);
-            if (hasLayout)
-                _iconLayouts.RestoreLayout(snapshotPath);
-            else
-                Native.DesktopIconManager.ArrangeInGrid();
-        });
+        _shownPath = path;
+        RefreshJunction();
+        _pendingLayoutRestore = StartLayoutRestore(path, namesBefore, arrangeIfNew, lockGen);
     }
 
-    /// <summary>Restores the original desktop. Safe to call multiple times.</summary>
+    /// <summary>Shows the real desktop again. Safe to call multiple times.</summary>
     public void Restore()
     {
-        if (_currentRedirectedPath == null) return;
+        if (SamePath(_shownPath, _realDesktop)) return;
 
-        _iconLayouts.SaveLayout(_currentRedirectedPath);
+        CancelPendingLayoutRestore();
+        _iconLayouts.SaveLayout(_shownPath); // logs its own failures
+        var namesBefore = DesktopIconManager.ReadNames();
 
-        if (_publicStashed)
+        int lockGen = LockDrawingFor(_realDesktop, arrangeIfNew: false);
+        try
         {
-            RestorePublicDesktop();
-            _publicStashed = false;
-        }
-
-        SetKnownFolderPath(_originalUserDesktop);
-        _currentRedirectedPath = null;
-        _crashStateWritten = false;
-
-        TryDelete(UserStateFile);
-
-        // Restore original desktop icon positions after public items are back
-        if (_iconLayouts.HasLayout(_originalUserDesktop))
-        {
-            string origPath = _originalUserDesktop;
-            int origCount = _iconLayouts.GetSavedCount(_originalUserDesktop);
-            _ = Task.Run(async () =>
+            try { Junction.Point(JunctionPath, _realDesktop); }
+            catch (Exception ex)
             {
-                await WaitForIconsAsync(origCount);
-                _iconLayouts.RestoreLayout(origPath);
-            });
+                // The next start retries (it always points the junction home)
+                Log.Error($"Pointing the desktop back at {_realDesktop} failed", ex);
+                return;
+            }
+            _shownPath = _realDesktop;
+            RefreshJunction();
+
+            // This runs on exit, so wait for it (bounded) instead of leaving it
+            // to a task the exiting process would kill
+            var restore = StartLayoutRestore(_realDesktop, namesBefore, arrangeIfNew: false, lockGen);
+            try { restore.Wait(TimeSpan.FromSeconds(8)); } catch { }
+        }
+        finally
+        {
+            // The UI thread is busy here, so the restore's own unlock can't run
+            UnlockDrawing(lockGen);
         }
     }
 
@@ -165,26 +334,169 @@ public sealed class DesktopFolderService : IDisposable
         Restore();
     }
 
-    // ── Icon readiness polling ────────────────────────────────────────────
+    // ── Layout restore after a switch ────────────────────────────────────
 
-    private static async Task WaitForIconsAsync(int expectedMin, int timeoutMs = 2000)
+    /// <summary>
+    /// Restores (or, for a first visit, arranges) the icons of path once
+    /// Explorer shows it. Restores run one at a time and a newer switch
+    /// cancels an older one, so navigating quickly can't apply one folder's
+    /// layout to another.
+    /// </summary>
+    private Task StartLayoutRestore(string path, HashSet<string> namesBefore, bool arrangeIfNew, int lockGen)
     {
-        if (expectedMin <= 0) expectedMin = 1;
-        int stable = 0, last = -1;
-        var sw = System.Diagnostics.Stopwatch.StartNew();
-        while (sw.ElapsedMilliseconds < timeoutMs)
+        var cts = new CancellationTokenSource();
+        _layoutCts = cts;
+        var token = cts.Token;
+        bool hasLayout = _iconLayouts.HasLayout(path);
+        if (!hasLayout && !arrangeIfNew)
         {
-            int count = Native.DesktopIconManager.GetIconCount();
-            if (count >= expectedMin)
-            {
-                if (count == last) { if (++stable >= 2) break; }
-                else { stable = 0; last = count; }
-            }
-            await Task.Delay(50);
+            UnlockDrawing(lockGen);
+            return Task.CompletedTask;
         }
+
+        // Not passing token to Task.Run: the finally below must always run,
+        // or the desktop would stay locked
+        return Task.Run(async () =>
+        {
+            try
+            {
+                await _layoutGate.WaitAsync(token);
+                try
+                {
+                    if (!await WaitForFolderShownAsync(namesBefore, token))
+                    {
+                        // Never touch icons unless Explorer really shows this folder
+                        Log.Error($"Explorer didn't show {path} in time; icon positions left untouched");
+                        return;
+                    }
+                    token.ThrowIfCancellationRequested();
+                    if (hasLayout)
+                        _iconLayouts.RestoreLayout(path);
+                    else
+                        DesktopIconManager.ArrangeInGrid();
+                }
+                finally { _layoutGate.Release(); }
+            }
+            catch (OperationCanceledException) { }
+            finally
+            {
+                if (_ui != null) _ui.Post(_ => UnlockDrawing(lockGen), null);
+            }
+        });
     }
 
-    // ── Known folder helpers ──────────────────────────────────────────────
+    /// <summary>
+    /// Locks drawing of the desktop icons if a restore will follow the switch
+    /// to path. Returns the lock's generation (0 if nothing was locked).
+    /// </summary>
+    private int LockDrawingFor(string path, bool arrangeIfNew)
+    {
+        if (!arrangeIfNew && !_iconLayouts.HasLayout(path)) return 0;
+        if (!_drawingLocked) _drawingLocked = DesktopIconManager.LockDrawing();
+        return _drawingLocked ? ++_lockGeneration : 0;
+    }
+
+    /// <summary>Unlocks drawing, unless a newer switch has locked it since.</summary>
+    private void UnlockDrawing(int lockGen)
+    {
+        if (lockGen == 0 || lockGen != _lockGeneration || !_drawingLocked) return;
+        DesktopIconManager.UnlockDrawing();
+        _drawingLocked = false;
+    }
+
+    private void CancelPendingLayoutRestore()
+    {
+        _layoutCts?.Cancel();
+        // Let a restore that's mid-write finish before reading positions again
+        try { _pendingLayoutRestore?.Wait(TimeSpan.FromSeconds(5)); } catch { }
+    }
+
+    /// <summary>
+    /// Waits until Explorer's icons are no longer the previous folder's and
+    /// the icon count has stopped changing. Checking only the count could
+    /// match the old folder's icons before Explorer refreshed.
+    /// </summary>
+    /// <returns>
+    /// True once the new folder is shown and settled. False if Explorer still
+    /// shows the previous folder's icons when the timeout runs out; callers
+    /// must then leave the icons alone, or they would rearrange the wrong
+    /// folder (e.g. the user's real desktop).
+    /// </returns>
+    private static async Task<bool> WaitForFolderShownAsync(HashSet<string> namesBefore, CancellationToken token, int timeoutMs = 6000)
+    {
+        var sw = Stopwatch.StartNew();
+        bool changed = namesBefore.Count == 0;
+        int stable = 0, last = -1;
+        while (sw.ElapsedMilliseconds < timeoutMs)
+        {
+            token.ThrowIfCancellationRequested();
+            if (!changed)
+            {
+                var now = DesktopIconManager.ReadNames();
+                changed = !now.SetEquals(namesBefore);
+            }
+            else
+            {
+                int count = DesktopIconManager.GetIconCount();
+                if (count == last) { if (++stable >= 3) return true; }
+                else { stable = 0; last = count; }
+            }
+            await Task.Delay(40, token);
+        }
+        return false;
+    }
+
+    // ── Helpers ───────────────────────────────────────────────────────────
+
+    /// <summary>Tells Explorer the junction's contents changed, so the desktop re-reads it.</summary>
+    private static void RefreshJunction()
+        => SHChangeNotify(SHCNE_UPDATEDIR, SHCNF_PATHW | SHCNF_FLUSH, JunctionPath, IntPtr.Zero);
+
+    /// <summary>
+    /// The user's real desktop: the Desktop location itself before setup,
+    /// afterwards what setup recorded. Older versions left the real one in
+    /// their crash-recovery file when they ended while redirected.
+    /// </summary>
+    private static string FindRealDesktop()
+    {
+        string? legacy = ReadFile(LegacyStateFile);
+        if (legacy != null && Directory.Exists(legacy)) return legacy;
+
+        string known = GetKnownFolderPath();
+        if (!SamePath(known, JunctionPath)) return known;
+
+        string? recorded = ReadFile(RealDesktopFile);
+        if (recorded != null && Directory.Exists(recorded)) return recorded;
+
+        // Recorded file lost: the profile's standard Desktop folder
+        return Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), "Desktop");
+    }
+
+    private static bool NewExplorerRunning(int session, HashSet<int> oldIds)
+    {
+        var procs = Process.GetProcessesByName("explorer");
+        try { return procs.Any(p => p.SessionId == session && !oldIds.Contains(p.Id)); }
+        finally { foreach (var p in procs) p.Dispose(); }
+    }
+
+    internal static bool IsNetworkPath(string path)
+    {
+        if (path.StartsWith(@"\\", StringComparison.Ordinal)) return true;
+        try
+        {
+            string? root = Path.GetPathRoot(path);
+            return root != null && new DriveInfo(root).DriveType == DriveType.Network;
+        }
+        catch { return false; }
+    }
+
+    private static bool IsInside(string path, string folder)
+        => IconLayoutService.NormalizePath(path).StartsWith(IconLayoutService.NormalizePath(folder) + "\\",
+            StringComparison.OrdinalIgnoreCase) || SamePath(path, folder);
+
+    private static bool SamePath(string a, string b)
+        => string.Equals(IconLayoutService.NormalizePath(a), IconLayoutService.NormalizePath(b),
+            StringComparison.OrdinalIgnoreCase);
 
     private static string GetKnownFolderPath()
     {
@@ -195,74 +507,57 @@ public sealed class DesktopFolderService : IDisposable
         finally { CoTaskMemFree(ptr); }
     }
 
-    private static void SetKnownFolderPath(string path)
+    /// <summary>Points the Desktop known folder at path; false if Windows refused.</summary>
+    private static bool TrySetKnownFolderPath(string path)
     {
         var guid = FOLDERID_Desktop;
-        SHSetKnownFolderPath(ref guid, 0, IntPtr.Zero, path);
-        SHChangeNotify(SHCNE_ASSOCCHANGED, SHCNF_IDLIST | SHCNF_FLUSH, IntPtr.Zero, IntPtr.Zero);
+        return SHSetKnownFolderPath(ref guid, 0, IntPtr.Zero, path) == 0;
     }
 
-    // ── Public Desktop stash ─────────────────────────────────────────────
-
-    private void StashPublicDesktop()
+    private static string? ReadFile(string file)
     {
         try
         {
-            if (!Directory.Exists(PublicDesktopPath)) return;
+            if (!File.Exists(file)) return null;
+            string text = File.ReadAllText(file).Trim();
+            return text.Length > 0 ? text : null;
+        }
+        catch { return null; }
+    }
 
-            // Build set of names already in the user's desktop so we skip duplicates
-            var userNames = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-            if (Directory.Exists(_originalUserDesktop))
+    // ── Legacy Public Desktop stash ──────────────────────────────────────
+
+    /// <summary>
+    /// Moves items left in the old stash folder back to the Public Desktop.
+    /// Never overwrites or deletes: anything whose name already exists on the
+    /// Public Desktop stays in the stash for the user to resolve.
+    /// </summary>
+    private static void RestoreLegacyPublicStash()
+    {
+        if (!Directory.Exists(PublicStashDir)) return;
+
+        foreach (var item in Directory.GetFileSystemEntries(PublicStashDir))
+        {
+            string dest = Path.Combine(PublicDesktopPath, Path.GetFileName(item));
+            if (File.Exists(dest) || Directory.Exists(dest)) continue;
+            try
             {
-                foreach (var e in Directory.GetFileSystemEntries(_originalUserDesktop))
-                    userNames.Add(Path.GetFileName(e));
+                if (File.Exists(item)) File.Move(item, dest);
+                else if (Directory.Exists(item)) Directory.Move(item, dest);
             }
-
-            Directory.CreateDirectory(PublicStashDir);
-
-            foreach (var item in Directory.GetFileSystemEntries(PublicDesktopPath))
+            catch (Exception ex)
             {
-                string name = Path.GetFileName(item);
-                if (name.Equals("desktop.ini", StringComparison.OrdinalIgnoreCase)) continue;
-                if (userNames.Contains(name)) continue; // already present in user desktop
-
-                string dest = Path.Combine(PublicStashDir, name);
-                if (File.Exists(item))
-                    File.Move(item, dest, overwrite: true);
-                else if (Directory.Exists(item))
-                    MoveDirectory(item, dest);
+                // Public Desktop usually needs admin rights; leave the item stashed
+                Log.Error($"Moving {item} back to the Public Desktop failed", ex);
             }
         }
-        catch { /* best effort — public desktop may be inaccessible */ }
-    }
 
-    private static void RestorePublicDesktop()
-    {
         try
         {
-            if (!Directory.Exists(PublicStashDir)) return;
-
-            foreach (var item in Directory.GetFileSystemEntries(PublicStashDir))
-            {
-                string name = Path.GetFileName(item);
-                string dest = Path.Combine(PublicDesktopPath, name);
-                if (File.Exists(item))
-                    File.Move(item, dest, overwrite: true);
-                else if (Directory.Exists(item))
-                    MoveDirectory(item, dest);
-            }
-
-            // Remove stash dir if empty
-            if (!Directory.GetFileSystemEntries(PublicStashDir).Any())
+            if (!Directory.EnumerateFileSystemEntries(PublicStashDir).Any())
                 Directory.Delete(PublicStashDir);
         }
-        catch { /* best effort */ }
-    }
-
-    private static void MoveDirectory(string source, string dest)
-    {
-        if (Directory.Exists(dest)) Directory.Delete(dest, recursive: true);
-        Directory.Move(source, dest);
+        catch { }
     }
 
     private static void TryDelete(string path)

@@ -1,5 +1,6 @@
 using System.Windows;
 using System.Windows.Input;
+using DesktopLS.Native;
 using DesktopLS.Services;
 using DesktopLS.ViewModels;
 
@@ -11,6 +12,7 @@ public partial class MainWindow : Window
     private readonly DesktopFolderService _desktopFolder;
     private readonly SettingsService _settings;
     private readonly WindowMonitorService _windowMonitor;
+    private readonly BarPositioner _positioner;
 
     public MainWindow()
     {
@@ -19,11 +21,21 @@ public partial class MainWindow : Window
         var navigation = new NavigationService();
         var autocomplete = new AutocompleteService();
         _desktopFolder = new DesktopFolderService();
+        ((App)Application.Current).DesktopFolder = _desktopFolder;
+        if (_desktopFolder.NeedsExplorerRestart &&
+            MessageBox.Show(
+                "To switch folders on the desktop, DesktopLS has to restart Windows Explorer once.\n\n" +
+                "The taskbar disappears for a few seconds and open File Explorer windows close. " +
+                "This is only needed the first time.\n\nRestart Explorer now? (Choose No to wait until you next sign in.)",
+                "DesktopLS", MessageBoxButton.YesNo, MessageBoxImage.Information) == MessageBoxResult.Yes)
+        {
+            _desktopFolder.RestartExplorerForSetup();
+        }
         _settings = new SettingsService();
         _settings.Load();
 
         _windowMonitor = new WindowMonitorService(this);
-        _windowMonitor.Enabled = _settings.HideOnMaximized;
+        _windowMonitor.Enabled = _settings.HideOnMaximized && !_settings.ReserveSpace;
 
         _viewModel = new MainViewModel(navigation, autocomplete, _desktopFolder, _settings);
         DataContext = _viewModel;
@@ -35,19 +47,23 @@ public partial class MainWindow : Window
             e.Handled = true;
         };
 
-        // Window monitor
+        _positioner = new BarPositioner(this, _settings);
+
+        // Window monitor. With space reserved, maximized windows stop at the
+        // bar, so there's nothing to hide from.
         _windowMonitor.MaximizedWindowStateChanged += isMaximized =>
         {
-            if (_settings.HideOnMaximized)
+            if (_settings.HideOnMaximized && !_settings.ReserveSpace)
                 Dispatcher.Invoke(() => Visibility = isMaximized ? Visibility.Hidden : Visibility.Visible);
         };
 
         // Settings changed subscription
         _settings.SettingsChanged += () =>
         {
-            _windowMonitor.Enabled = _settings.HideOnMaximized;
-            if (!_settings.HideOnMaximized)
+            _windowMonitor.Enabled = _settings.HideOnMaximized && !_settings.ReserveSpace;
+            if (!_windowMonitor.Enabled)
                 Visibility = Visibility.Visible;
+            _positioner.Apply();
         };
 
         Loaded += OnLoaded;
@@ -58,19 +74,21 @@ public partial class MainWindow : Window
         InputBindings.Add(new KeyBinding(_viewModel.GoUpCommand, Key.Up, ModifierKeys.Alt));
         InputBindings.Add(new KeyBinding(_viewModel.RefreshCommand, Key.F5, ModifierKeys.None));
 
+        // Drag anywhere; on release the bar snaps to the nearer edge of the
+        // monitor it's on and remembers the spot
         MouseLeftButtonDown += (_, _) =>
         {
             try { DragMove(); } catch { }
+            _positioner.OnDragged();
         };
     }
 
     private void OnLoaded(object sender, RoutedEventArgs e)
     {
-        Left = (SystemParameters.PrimaryScreenWidth - Width) / 2;
-        Top = 0;
+        _positioner.Attach();
 
         string startPath = Application.Current.Properties["StartPath"] as string
-            ?? Environment.GetFolderPath(Environment.SpecialFolder.Desktop);
+            ?? _desktopFolder.OriginalDesktop;
         _viewModel.Initialize(startPath);
 
         _windowMonitor.Start();
@@ -79,9 +97,36 @@ public partial class MainWindow : Window
         PathBox.SelectAll();
     }
 
+    private void UndoSetup_Click(object sender, RoutedEventArgs e)
+    {
+        SettingsPopup.IsOpen = false;
+        if (MessageBox.Show(
+                "This points your Desktop back at its real folder, turns off Run on startup, restarts Windows Explorer once " +
+                "(the taskbar disappears for a few seconds and open File Explorer windows close), and closes DesktopLS.\n\n" +
+                "Your files and saved icon layouts are kept. Opening DesktopLS again sets it up again.\n\nContinue?",
+                "DesktopLS", MessageBoxButton.YesNo, MessageBoxImage.Question) != MessageBoxResult.Yes)
+            return;
+
+        try
+        {
+            _desktopFolder.Restore();             // show the real desktop first
+            _viewModel.StartupEnabled = false;
+            DesktopFolderService.UndoSetup(restartExplorer: true);
+        }
+        catch (Exception ex)
+        {
+            Log.Error("Undoing the DesktopLS setup failed", ex);
+            MessageBox.Show($"Couldn't put the Desktop back: {ex.Message}", "DesktopLS",
+                MessageBoxButton.OK, MessageBoxImage.Error);
+            return;
+        }
+        Close();
+    }
+
     private void OnClosing(object? sender, System.ComponentModel.CancelEventArgs e)
     {
         _windowMonitor.Stop();
+        _positioner.Dispose(); // gives reserved space back
         _settings.Save();
         _desktopFolder.Dispose();
     }
