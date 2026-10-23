@@ -31,8 +31,16 @@ public partial class App : Application
         }
 
         DispatcherUnhandledException += OnDispatcherUnhandledException;
-        AppDomain.CurrentDomain.UnhandledException += (_, _) => RestoreDesktop();
-        TaskScheduler.UnobservedTaskException += (_, args) => args.SetObserved();
+        AppDomain.CurrentDomain.UnhandledException += (_, args) =>
+        {
+            Log.Error("Unhandled exception", args.ExceptionObject as Exception);
+            RestoreDesktop();
+        };
+        TaskScheduler.UnobservedTaskException += (_, args) =>
+        {
+            Log.Error("Unobserved task exception", args.Exception);
+            args.SetObserved();
+        };
         SessionEnding += (_, _) => RestoreDesktop();
 
         base.OnStartup(e);
@@ -52,6 +60,7 @@ public partial class App : Application
 
     private void OnDispatcherUnhandledException(object sender, DispatcherUnhandledExceptionEventArgs e)
     {
+        Log.Error("Unhandled UI exception", e.Exception);
         RestoreDesktop();
         MessageBox.Show($"DesktopLS hit an unexpected error and will close. Your desktop has been restored.\n\n{e.Exception.Message}",
             "DesktopLS", MessageBoxButton.OK, MessageBoxImage.Error);
@@ -72,6 +81,7 @@ public partial class App : Application
 
     private void RestoreDesktop()
     {
-        try { DesktopFolder?.Restore(); } catch { }
+        try { DesktopFolder?.Restore(); }
+        catch (Exception ex) { Log.Error("Restoring the desktop failed", ex); }
     }
 }

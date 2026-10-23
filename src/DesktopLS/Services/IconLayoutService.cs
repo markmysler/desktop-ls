@@ -44,7 +44,7 @@ public class IconLayoutService
                 Persist();
             }
         }
-        catch { /* best effort */ }
+        catch (Exception ex) { Log.Error($"Saving icon layout for {folderPath} failed", ex); }
     }
 
     public void RestoreLayout(string? folderPath)
@@ -64,7 +64,7 @@ public class IconLayoutService
 
             DesktopIconManager.WritePositions(positions);
         }
-        catch { /* best effort */ }
+        catch (Exception ex) { Log.Error($"Restoring icon layout for {folderPath} failed", ex); }
     }
 
     public bool HasLayout(string? folderPath)
@@ -102,7 +102,7 @@ public class IconLayoutService
             string json = JsonSerializer.Serialize(_store, new JsonSerializerOptions { WriteIndented = true });
             AtomicFile.WriteAllText(LayoutsFile, json);
         }
-        catch { }
+        catch (Exception ex) { Log.Error("Writing layouts.json failed", ex); }
     }
 
     private static Dictionary<string, Dictionary<string, int[]>> Load()
@@ -114,7 +114,11 @@ public class IconLayoutService
             var loaded = JsonSerializer.Deserialize<Dictionary<string, Dictionary<string, int[]>>>(json) ?? new();
             return NormalizeStore(loaded);
         }
-        catch { return new(StringComparer.OrdinalIgnoreCase); }
+        catch (Exception ex)
+        {
+            Log.Error("Reading layouts.json failed; starting with no saved layouts", ex);
+            return new(StringComparer.OrdinalIgnoreCase);
+        }
     }
 
     /// <summary>

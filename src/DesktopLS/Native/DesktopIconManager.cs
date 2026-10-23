@@ -98,8 +98,8 @@ public static class DesktopIconManager
             : result;
     }
     [DllImport("user32.dll")] private static extern uint GetWindowThreadProcessId(IntPtr hWnd, out uint lpdwProcessId);
-    [DllImport("user32.dll")] private static extern int GetWindowLong(IntPtr hWnd, int nIndex);
-    [DllImport("user32.dll")] private static extern int SetWindowLong(IntPtr hWnd, int nIndex, int dwNewLong);
+    [DllImport("user32.dll")] private static extern IntPtr GetWindowLongPtr(IntPtr hWnd, int nIndex);
+    [DllImport("user32.dll")] private static extern IntPtr SetWindowLongPtr(IntPtr hWnd, int nIndex, IntPtr dwNewLong);
     [DllImport("user32.dll")] private static extern int GetSystemMetrics(int nIndex);
     [DllImport("kernel32.dll", SetLastError = true)] private static extern IntPtr OpenProcess(uint dwDesiredAccess, bool bInheritHandle, uint dwProcessId);
     [DllImport("kernel32.dll", SetLastError = true)] private static extern IntPtr VirtualAllocEx(IntPtr hProcess, IntPtr lpAddress, uint dwSize, uint flAllocationType, uint flProtect);
@@ -123,7 +123,7 @@ public static class DesktopIconManager
 
         GetWindowThreadProcessId(lv, out uint pid);
         IntPtr hProc = OpenProcess(PROCESS_VM_READ | PROCESS_VM_WRITE | PROCESS_VM_OPERATION, false, pid);
-        if (hProc == IntPtr.Zero) return result;
+        if (hProc == IntPtr.Zero) { LogOpenFailure(); return result; }
 
         try
         {
@@ -155,14 +155,14 @@ public static class DesktopIconManager
                 {
                     item.iItem = i;
                     MarshalToBytes(item, itemBytes);
-                    WriteProcessMemory(hProc, remoteBlock, itemBytes, lvItemSize, out _);
+                    if (!WriteProcessMemory(hProc, remoteBlock, itemBytes, lvItemSize, out _)) continue;
                     SendMessage(lv, LVM_GETITEMW, (IntPtr)i, remoteBlock);
-                    ReadProcessMemory(hProc, remoteText, textBytes, textBufSize, out _);
+                    if (!ReadProcessMemory(hProc, remoteText, textBytes, textBufSize, out _)) continue;
                     string name = Encoding.Unicode.GetString(textBytes).TrimEnd('\0');
                     if (string.IsNullOrEmpty(name)) continue;
 
-                    SendMessage(lv, LVM_GETITEMPOSITION, (IntPtr)i, remotePt);
-                    ReadProcessMemory(hProc, remotePt, ptBytes, ptSize, out _);
+                    if (SendMessage(lv, LVM_GETITEMPOSITION, (IntPtr)i, remotePt) == IntPtr.Zero) continue;
+                    if (!ReadProcessMemory(hProc, remotePt, ptBytes, ptSize, out _)) continue;
                     var pt = BytesToStruct<POINT>(ptBytes);
                     result[name] = (pt.X, pt.Y);
                 }
@@ -182,71 +182,74 @@ public static class DesktopIconManager
 
         GetWindowThreadProcessId(lv, out uint pid);
         IntPtr hProc = OpenProcess(PROCESS_VM_READ | PROCESS_VM_WRITE | PROCESS_VM_OPERATION, false, pid);
-        if (hProc == IntPtr.Zero) return;
+        if (hProc == IntPtr.Zero) { LogOpenFailure(); return; }
 
         try
         {
             int count = (int)SendMessage(lv, LVM_GETITEMCOUNT, IntPtr.Zero, IntPtr.Zero);
             if (count <= 0) return;
 
-            int style = GetWindowLong(lv, GWL_STYLE);
-            if ((style & LVS_AUTOARRANGE) != 0)
-                SetWindowLong(lv, GWL_STYLE, style & ~LVS_AUTOARRANGE);
-
-            const int MaxPath = 260;
-            uint textBufSize = (uint)(MaxPath * 2);
-            uint lvItemSize = (uint)Marshal.SizeOf<LVITEMW>();
-            uint ptSize = (uint)Marshal.SizeOf<POINT>();
-            uint totalSize = lvItemSize + textBufSize + ptSize;
-
-            IntPtr remoteBlock = VirtualAllocEx(hProc, IntPtr.Zero, totalSize, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
-            if (remoteBlock == IntPtr.Zero) return;
-
-            IntPtr remoteText = remoteBlock + (int)lvItemSize;
-            IntPtr remotePt = remoteText + (int)textBufSize;
-
-            byte[] itemBytes = new byte[lvItemSize];
-            byte[] textBytes = new byte[textBufSize];
-            byte[] ptBytes = new byte[ptSize];
-
+            // Auto-arrange would undo our positions; turn it off and always
+            // turn it back on, even if something below fails
+            IntPtr style = GetWindowLongPtr(lv, GWL_STYLE);
+            if ((style.ToInt64() & LVS_AUTOARRANGE) != 0)
+                SetWindowLongPtr(lv, GWL_STYLE, new IntPtr(style.ToInt64() & ~LVS_AUTOARRANGE));
             try
             {
-                var indexMap = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
-                var item = new LVITEMW { mask = LVIF_TEXT, iSubItem = 0, pszText = remoteText, cchTextMax = MaxPath };
+                const int MaxPath = 260;
+                uint textBufSize = (uint)(MaxPath * 2);
+                uint lvItemSize = (uint)Marshal.SizeOf<LVITEMW>();
+                uint ptSize = (uint)Marshal.SizeOf<POINT>();
+                uint totalSize = lvItemSize + textBufSize + ptSize;
 
-                for (int i = 0; i < count; i++)
-                {
-                    item.iItem = i;
-                    MarshalToBytes(item, itemBytes);
-                    WriteProcessMemory(hProc, remoteBlock, itemBytes, lvItemSize, out _);
-                    SendMessage(lv, LVM_GETITEMW, (IntPtr)i, remoteBlock);
-                    ReadProcessMemory(hProc, remoteText, textBytes, textBufSize, out _);
-                    string name = Encoding.Unicode.GetString(textBytes).TrimEnd('\0');
-                    if (!string.IsNullOrEmpty(name)) indexMap[name] = i;
-                }
+                IntPtr remoteBlock = VirtualAllocEx(hProc, IntPtr.Zero, totalSize, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
+                if (remoteBlock == IntPtr.Zero) return;
 
-                // Suppress redraws while repositioning so all icons snap at once
-                SendMessage(lv, WM_SETREDRAW, IntPtr.Zero, IntPtr.Zero);
+                IntPtr remoteText = remoteBlock + (int)lvItemSize;
+                IntPtr remotePt = remoteText + (int)textBufSize;
+
+                byte[] itemBytes = new byte[lvItemSize];
+                byte[] textBytes = new byte[textBufSize];
+                byte[] ptBytes = new byte[ptSize];
+
                 try
                 {
-                    foreach (var (name, (x, y)) in positions)
+                    var indexMap = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
+                    var item = new LVITEMW { mask = LVIF_TEXT, iSubItem = 0, pszText = remoteText, cchTextMax = MaxPath };
+
+                    for (int i = 0; i < count; i++)
                     {
-                        if (!indexMap.TryGetValue(name, out int idx)) continue;
-                        var pt = new POINT { X = x, Y = y };
-                        MarshalToBytes(pt, ptBytes);
-                        WriteProcessMemory(hProc, remotePt, ptBytes, ptSize, out _);
-                        SendMessage(lv, LVM_SETITEMPOSITION32, (IntPtr)idx, remotePt);
+                        item.iItem = i;
+                        MarshalToBytes(item, itemBytes);
+                        if (!WriteProcessMemory(hProc, remoteBlock, itemBytes, lvItemSize, out _)) continue;
+                        SendMessage(lv, LVM_GETITEMW, (IntPtr)i, remoteBlock);
+                        if (!ReadProcessMemory(hProc, remoteText, textBytes, textBufSize, out _)) continue;
+                        string name = Encoding.Unicode.GetString(textBytes).TrimEnd('\0');
+                        if (!string.IsNullOrEmpty(name)) indexMap[name] = i;
+                    }
+
+                    // Suppress redraws while repositioning so all icons snap at once
+                    SendMessage(lv, WM_SETREDRAW, IntPtr.Zero, IntPtr.Zero);
+                    try
+                    {
+                        foreach (var (name, (x, y)) in positions)
+                        {
+                            if (!indexMap.TryGetValue(name, out int idx)) continue;
+                            var pt = new POINT { X = x, Y = y };
+                            MarshalToBytes(pt, ptBytes);
+                            if (!WriteProcessMemory(hProc, remotePt, ptBytes, ptSize, out _)) continue;
+                            SendMessage(lv, LVM_SETITEMPOSITION32, (IntPtr)idx, remotePt);
+                        }
+                    }
+                    finally
+                    {
+                        SendMessage(lv, WM_SETREDRAW, (IntPtr)1, IntPtr.Zero);
+                        InvalidateRect(lv, IntPtr.Zero, true);
                     }
                 }
-                finally
-                {
-                    SendMessage(lv, WM_SETREDRAW, (IntPtr)1, IntPtr.Zero);
-                    InvalidateRect(lv, IntPtr.Zero, true);
-                }
+                finally { VirtualFreeEx(hProc, remoteBlock, 0, MEM_RELEASE); }
             }
-            finally { VirtualFreeEx(hProc, remoteBlock, 0, MEM_RELEASE); }
-
-            SetWindowLong(lv, GWL_STYLE, style);
+            finally { SetWindowLongPtr(lv, GWL_STYLE, style); }
         }
         finally { CloseHandle(hProc); }
     }
@@ -298,56 +301,59 @@ public static class DesktopIconManager
         // Read icon names, assign slots
         GetWindowThreadProcessId(lv, out uint pid);
         IntPtr hProc = OpenProcess(PROCESS_VM_READ | PROCESS_VM_WRITE | PROCESS_VM_OPERATION, false, pid);
-        if (hProc == IntPtr.Zero) return;
+        if (hProc == IntPtr.Zero) { LogOpenFailure(); return; }
 
         try
         {
-            int style = GetWindowLong(lv, GWL_STYLE);
-            if ((style & LVS_AUTOARRANGE) != 0)
-                SetWindowLong(lv, GWL_STYLE, style & ~LVS_AUTOARRANGE);
-
-            const int MaxPath = 260;
-            uint textBufSize = (uint)(MaxPath * 2);
-            uint lvItemSize = (uint)Marshal.SizeOf<LVITEMW>();
-            uint ptSize = (uint)Marshal.SizeOf<POINT>();
-            uint totalSize = lvItemSize + textBufSize + ptSize;
-
-            IntPtr remoteBlock = VirtualAllocEx(hProc, IntPtr.Zero, totalSize, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
-            if (remoteBlock == IntPtr.Zero) return;
-
-            IntPtr remoteText = remoteBlock + (int)lvItemSize;
-            IntPtr remotePt = remoteText + (int)textBufSize;
-
-            byte[] itemBytes = new byte[lvItemSize];
-            byte[] textBytes = new byte[textBufSize];
-            byte[] ptBytes = new byte[ptSize];
-
+            // Auto-arrange would undo our positions; turn it off and always
+            // turn it back on, even if something below fails
+            IntPtr style = GetWindowLongPtr(lv, GWL_STYLE);
+            if ((style.ToInt64() & LVS_AUTOARRANGE) != 0)
+                SetWindowLongPtr(lv, GWL_STYLE, new IntPtr(style.ToInt64() & ~LVS_AUTOARRANGE));
             try
             {
-                var item = new LVITEMW { mask = LVIF_TEXT, iSubItem = 0, pszText = remoteText, cchTextMax = MaxPath };
+                const int MaxPath = 260;
+                uint textBufSize = (uint)(MaxPath * 2);
+                uint lvItemSize = (uint)Marshal.SizeOf<LVITEMW>();
+                uint ptSize = (uint)Marshal.SizeOf<POINT>();
+                uint totalSize = lvItemSize + textBufSize + ptSize;
 
-                // Suppress redraws so all icons snap into grid at once
-                SendMessage(lv, WM_SETREDRAW, IntPtr.Zero, IntPtr.Zero);
+                IntPtr remoteBlock = VirtualAllocEx(hProc, IntPtr.Zero, totalSize, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
+                if (remoteBlock == IntPtr.Zero) return;
+
+                IntPtr remoteText = remoteBlock + (int)lvItemSize;
+                IntPtr remotePt = remoteText + (int)textBufSize;
+
+                byte[] itemBytes = new byte[lvItemSize];
+                byte[] textBytes = new byte[textBufSize];
+                byte[] ptBytes = new byte[ptSize];
+
                 try
                 {
-                    for (int i = 0; i < Math.Min(count, slots.Count); i++)
+                    var item = new LVITEMW { mask = LVIF_TEXT, iSubItem = 0, pszText = remoteText, cchTextMax = MaxPath };
+
+                    // Suppress redraws so all icons snap into grid at once
+                    SendMessage(lv, WM_SETREDRAW, IntPtr.Zero, IntPtr.Zero);
+                    try
                     {
-                        var (x, y) = slots[i];
-                        var pt = new POINT { X = x, Y = y };
-                        MarshalToBytes(pt, ptBytes);
-                        WriteProcessMemory(hProc, remotePt, ptBytes, ptSize, out _);
-                        SendMessage(lv, LVM_SETITEMPOSITION32, (IntPtr)i, remotePt);
+                        for (int i = 0; i < Math.Min(count, slots.Count); i++)
+                        {
+                            var (x, y) = slots[i];
+                            var pt = new POINT { X = x, Y = y };
+                            MarshalToBytes(pt, ptBytes);
+                            if (!WriteProcessMemory(hProc, remotePt, ptBytes, ptSize, out _)) continue;
+                            SendMessage(lv, LVM_SETITEMPOSITION32, (IntPtr)i, remotePt);
+                        }
+                    }
+                    finally
+                    {
+                        SendMessage(lv, WM_SETREDRAW, (IntPtr)1, IntPtr.Zero);
+                        InvalidateRect(lv, IntPtr.Zero, true);
                     }
                 }
-                finally
-                {
-                    SendMessage(lv, WM_SETREDRAW, (IntPtr)1, IntPtr.Zero);
-                    InvalidateRect(lv, IntPtr.Zero, true);
-                }
+                finally { VirtualFreeEx(hProc, remoteBlock, 0, MEM_RELEASE); }
             }
-            finally { VirtualFreeEx(hProc, remoteBlock, 0, MEM_RELEASE); }
-
-            SetWindowLong(lv, GWL_STYLE, style);
+            finally { SetWindowLongPtr(lv, GWL_STYLE, style); }
         }
         finally { CloseHandle(hProc); }
     }
@@ -430,6 +436,9 @@ public static class DesktopIconManager
         IntPtr shellView = FindWindowEx(host, IntPtr.Zero, "SHELLDLL_DefView", null);
         return shellView == IntPtr.Zero ? IntPtr.Zero : FindWindowEx(shellView, IntPtr.Zero, "SysListView32", null);
     }
+
+    private static void LogOpenFailure()
+        => Services.Log.Error($"Opening Explorer's process failed (Win32 error {Marshal.GetLastWin32Error()})");
 
     private static void MarshalToBytes<T>(T s, byte[] dest) where T : struct
     {

@@ -73,9 +73,10 @@ public sealed class SettingsService : ISettingsService
                     _hideOnMaximized = data.HideOnMaximized;
             }
         }
-        catch
+        catch (Exception ex)
         {
-            // Best-effort load; use defaults on failure
+            // Use defaults on failure
+            Log.Error("Loading settings failed", ex);
         }
     }
 
@@ -88,9 +89,9 @@ public sealed class SettingsService : ISettingsService
             Directory.CreateDirectory(Path.GetDirectoryName(SettingsFile)!);
             AtomicFile.WriteAllText(SettingsFile, json);
         }
-        catch
+        catch (Exception ex)
         {
-            // Best-effort save
+            Log.Error("Saving settings failed", ex);
         }
     }
 
@@ -114,9 +115,9 @@ public sealed class SettingsService : ISettingsService
                 }
             }
         }
-        catch
+        catch (Exception ex)
         {
-            // Best-effort registry write
+            Log.Error("Updating the startup entry failed", ex);
         }
     }
 

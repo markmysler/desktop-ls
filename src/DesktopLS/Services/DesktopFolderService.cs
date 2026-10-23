@@ -68,6 +68,7 @@ public sealed class DesktopFolderService : IDesktopFolderService, IDisposable
             }
             else
             {
+                Log.Error($"Crash recovery: could not restore the desktop to {savedOriginal} yet");
                 // The original isn't reachable yet (e.g. OneDrive/network
                 // desktop not mounted) or the restore failed: keep the state
                 // file so the next start retries, and keep treating the saved
@@ -134,12 +135,16 @@ public sealed class DesktopFolderService : IDesktopFolderService, IDisposable
         if (_currentRedirectedPath == null) return;
 
         CancelPendingLayoutRestore();
-        try { _iconLayouts.SaveLayout(_currentRedirectedPath); } catch { }
+        _iconLayouts.SaveLayout(_currentRedirectedPath); // logs its own failures
         var namesBefore = Native.DesktopIconManager.ReadNames();
 
         // Keep the state file unless the restore really worked, so the next
         // start can still recover
-        if (!TrySetKnownFolderPath(_originalUserDesktop)) return;
+        if (!TrySetKnownFolderPath(_originalUserDesktop))
+        {
+            Log.Error($"Restoring the desktop to {_originalUserDesktop} failed; will retry on next start");
+            return;
+        }
         _currentRedirectedPath = null;
         _crashStateWritten = false;
 
@@ -277,7 +282,11 @@ public sealed class DesktopFolderService : IDesktopFolderService, IDisposable
                 if (File.Exists(item)) File.Move(item, dest);
                 else if (Directory.Exists(item)) Directory.Move(item, dest);
             }
-            catch { /* Public Desktop usually needs admin rights; leave the item stashed */ }
+            catch (Exception ex)
+            {
+                // Public Desktop usually needs admin rights; leave the item stashed
+                Log.Error($"Moving {item} back to the Public Desktop failed", ex);
+            }
         }
 
         try

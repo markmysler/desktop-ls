@@ -159,6 +159,7 @@ public sealed class MainViewModel : INotifyPropertyChanged
         }
         catch (Exception ex)
         {
+            Log.Error($"Showing {path} failed", ex);
             StatusMessage = ex.Message;
             return false;
         }
