@@ -57,6 +57,35 @@ public static class ShellDesktopView
         }
     }
 
+    /// <summary>
+    /// The file system folder Explorer's desktop is showing, as Explorer
+    /// resolved it when it started (null if it can't be asked). With the
+    /// Desktop pointed at a junction this is the junction's path, unless that
+    /// Explorer resolved the junction to its target.
+    /// </summary>
+    public static string? GetShownFolderPath()
+    {
+        try
+        {
+            var shellWindows = (IShellWindows)Activator.CreateInstance(
+                Type.GetTypeFromCLSID(CLSID_ShellWindows, throwOnError: true)!)!;
+            try
+            {
+                object location = CSIDL_DESKTOP;
+                object root = Type.Missing;
+                dynamic browser = shellWindows.FindWindowSW(ref location, ref root, SWC_DESKTOP, out _, SWFO_NEEDDISPATCH);
+                try { return (string?)browser.Document.Folder.Self.Path; }
+                finally { Marshal.ReleaseComObject(browser); }
+            }
+            finally { Marshal.ReleaseComObject(shellWindows); }
+        }
+        catch (Exception ex)
+        {
+            Services.Log.Error("Asking Explorer which folder the desktop shows failed", ex);
+            return null;
+        }
+    }
+
     // ── Getting the desktop's IFolderView ────────────────────────────────
     private static (IFolderView View, IShellFolder Folder) GetDesktopView()
     {

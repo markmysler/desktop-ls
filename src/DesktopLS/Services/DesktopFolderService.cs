@@ -55,8 +55,8 @@ public sealed class DesktopFolderService : IDesktopFolderService, IDisposable
     // The user's real desktop folder (where the junction points when idle)
     private static readonly string RealDesktopFile = Path.Combine(AppDataDir, "desktop_real.txt");
 
-    // Explorer instance that was running when the Desktop was moved to the
-    // junction; until it's gone, the desktop still shows the old location
+    // Left by a development build that tracked the pending Explorer restart
+    // in a file; now Explorer is asked directly (NeedsExplorerRestart)
     private static readonly string SetupPendingFile = Path.Combine(AppDataDir, "setup_pending.txt");
 
     // Earlier versions redirected the Desktop itself and kept the real one here
@@ -118,9 +118,9 @@ public sealed class DesktopFolderService : IDesktopFolderService, IDisposable
         {
             if (!TrySetKnownFolderPath(JunctionPath))
                 throw new IOException("Windows refused to move the Desktop to DesktopLS's folder.");
-            RecordSetupPending();
         }
         TryDelete(LegacyStateFile);
+        TryDelete(SetupPendingFile);
     }
 
     /// <summary>The user's real desktop folder.</summary>
@@ -129,32 +129,18 @@ public sealed class DesktopFolderService : IDesktopFolderService, IDisposable
     public string CurrentPath => _shownPath;
 
     /// <summary>
-    /// True until Explorer has restarted since the Desktop was moved to the
-    /// junction: the desktop can't switch folders before that.
+    /// True while Explorer's desktop isn't showing the junction: it started
+    /// before setup, or it resolved the junction to the folder behind it. The
+    /// desktop can't switch folders until Explorer restarts. Asked from
+    /// Explorer itself; false if it can't be asked (switching then simply
+    /// doesn't show, and icons are left alone).
     /// </summary>
     public bool NeedsExplorerRestart
     {
         get
         {
-            try
-            {
-                if (!File.Exists(SetupPendingFile)) return false;
-                var parts = File.ReadAllText(SetupPendingFile).Split('|');
-                if (parts.Length == 2 && int.TryParse(parts[0], out int pid) && long.TryParse(parts[1], out long started))
-                {
-                    try
-                    {
-                        using var p = Process.GetProcessById(pid);
-                        if (p.ProcessName.Equals("explorer", StringComparison.OrdinalIgnoreCase) &&
-                            p.StartTime.ToUniversalTime().Ticks == started)
-                            return true;
-                    }
-                    catch (ArgumentException) { } // that Explorer is gone
-                }
-                TryDelete(SetupPendingFile);
-                return false;
-            }
-            catch { return false; }
+            string? shown = ShellDesktopView.GetShownFolderPath();
+            return shown != null && !SamePath(shown, JunctionPath);
         }
     }
 
@@ -165,7 +151,9 @@ public sealed class DesktopFolderService : IDesktopFolderService, IDisposable
     public void RestartExplorerForSetup()
     {
         RestartExplorer();
-        TryDelete(SetupPendingFile);
+        WaitForShell();
+        if (NeedsExplorerRestart)
+            Log.Error("Explorer still doesn't show the desktop through DesktopLS's junction after restarting");
     }
 
     /// <summary>
@@ -213,24 +201,45 @@ public sealed class DesktopFolderService : IDesktopFolderService, IDisposable
         while (sw.ElapsedMilliseconds < 15000 && DesktopIconManager.GetIconCount() == 0) Thread.Sleep(200);
     }
 
+    [DllImport("user32.dll", CharSet = CharSet.Unicode)]
+    private static extern IntPtr FindWindow(string lpClassName, string? lpWindowName);
+
+    [DllImport("user32.dll")]
+    private static extern bool PostMessage(IntPtr hWnd, uint msg, IntPtr wParam, IntPtr lParam);
+
+    // Explorer's own "Exit Explorer" command (Ctrl+Shift+right-click on the taskbar)
+    private const uint WM_USER_EXIT_EXPLORER = 0x0400 + 436;
+
+    /// <summary>
+    /// Closes Explorer cleanly and starts it again. A clean exit matters: when
+    /// Explorer is killed, Windows restarts it by itself, and such an Explorer
+    /// was seen to resolve the junction to the folder behind it, which makes
+    /// the desktop impossible to switch. An Explorer started directly shows
+    /// the junction itself.
+    /// </summary>
     private static void RestartExplorer()
     {
         int session = Process.GetCurrentProcess().SessionId;
         var old = Process.GetProcessesByName("explorer").Where(p => p.SessionId == session).ToList();
         var oldIds = old.Select(p => p.Id).ToHashSet();
+
+        IntPtr tray = FindWindow("Shell_TrayWnd", null);
+        if (tray != IntPtr.Zero) PostMessage(tray, WM_USER_EXIT_EXPLORER, IntPtr.Zero, IntPtr.Zero);
         foreach (var p in old)
         {
-            // Force-kill: a normal exit would save Explorer's view state,
-            // which is the same either way, but is slower
-            try { p.Kill(); p.WaitForExit(3000); }
+            try
+            {
+                // Only if the clean exit didn't happen
+                if (!p.WaitForExit(5000)) { p.Kill(); p.WaitForExit(3000); }
+            }
             catch (Exception ex) { Log.Error($"Stopping explorer.exe ({p.Id}) failed", ex); }
             finally { p.Dispose(); }
         }
 
-        // Windows normally restarts the shell by itself; start it only if not,
-        // or a second explorer.exe would open a File Explorer window
+        // After a kill Windows may start one itself; a second explorer.exe
+        // would only open a File Explorer window, so wait briefly first
         var sw = Stopwatch.StartNew();
-        while (sw.ElapsedMilliseconds < 3000 && !NewExplorerRunning(session, oldIds)) Thread.Sleep(100);
+        while (sw.ElapsedMilliseconds < 1000 && !NewExplorerRunning(session, oldIds)) Thread.Sleep(100);
         if (!NewExplorerRunning(session, oldIds))
         {
             string exe = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.Windows), "explorer.exe");
@@ -461,19 +470,6 @@ public sealed class DesktopFolderService : IDesktopFolderService, IDisposable
 
         // Recorded file lost: the profile's standard Desktop folder
         return Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), "Desktop");
-    }
-
-    private static void RecordSetupPending()
-    {
-        try
-        {
-            int session = Process.GetCurrentProcess().SessionId;
-            var shell = Process.GetProcessesByName("explorer").Where(p => p.SessionId == session)
-                .OrderBy(p => p.StartTime).FirstOrDefault();
-            if (shell != null)
-                AtomicFile.WriteAllText(SetupPendingFile, $"{shell.Id}|{shell.StartTime.ToUniversalTime().Ticks}");
-        }
-        catch (Exception ex) { Log.Error("Recording that Explorer needs a restart failed", ex); }
     }
 
     private static bool NewExplorerRunning(int session, HashSet<int> oldIds)
