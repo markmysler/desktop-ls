@@ -26,3 +26,6 @@ Desktop.ini
 # App runtime data (crash recovery state files)
 src/DesktopLS/bin/
 src/DesktopLS/obj/
+
+# Test results
+TestResults/

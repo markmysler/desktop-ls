@@ -13,8 +13,8 @@ public sealed class MainViewModel : INotifyPropertyChanged
 {
     private readonly NavigationService _navigation;
     private readonly AutocompleteService _autocomplete;
-    private readonly DesktopFolderService _desktopFolder;
-    private readonly SettingsService _settings;
+    private readonly IDesktopFolderService _desktopFolder;
+    private readonly ISettingsService _settings;
     private string _pathText = string.Empty;
     private bool _isAutocompleteOpen;
     private string _statusMessage = string.Empty;
@@ -22,8 +22,8 @@ public sealed class MainViewModel : INotifyPropertyChanged
     public MainViewModel(
         NavigationService navigation,
         AutocompleteService autocomplete,
-        DesktopFolderService desktopFolder,
-        SettingsService settings)
+        IDesktopFolderService desktopFolder,
+        ISettingsService settings)
     {
         _navigation = navigation;
         _autocomplete = autocomplete;

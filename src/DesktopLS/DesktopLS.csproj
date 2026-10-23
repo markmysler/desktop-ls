@@ -31,4 +31,8 @@
     <Resource Include="Resources\app.ico" />
   </ItemGroup>
 
+  <ItemGroup>
+    <InternalsVisibleTo Include="DesktopLS.Tests" />
+  </ItemGroup>
+
 </Project>

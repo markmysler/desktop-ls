@@ -7,7 +7,7 @@ namespace DesktopLS.Services;
 /// <summary>
 /// Manages persistent user settings: startup registry key and hide-on-maximized preference.
 /// </summary>
-public sealed class SettingsService
+public sealed class SettingsService : ISettingsService
 {
     private static readonly string SettingsFile = Path.Combine(
         Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),

@@ -10,7 +10,7 @@ namespace DesktopLS.Services;
 /// to every user on the PC, so DesktopLS never modifies it.
 /// Saves and restores desktop icon positions per folder.
 /// </summary>
-public sealed class DesktopFolderService : IDisposable
+public sealed class DesktopFolderService : IDesktopFolderService, IDisposable
 {
     private static readonly Guid FOLDERID_Desktop = new("B4BFCC3A-DB2C-424C-B029-7FE99A87C641");
 
