@@ -48,6 +48,9 @@ public sealed class DesktopFolderService : IDisposable
     private readonly IconLayoutService _iconLayouts = new();
     private bool _disposed;
     private bool _crashStateWritten;
+    private readonly SemaphoreSlim _layoutGate = new(1, 1);
+    private CancellationTokenSource? _layoutCts;
+    private Task? _pendingLayoutRestore;
     private string? _currentRedirectedPath;
 
     public DesktopFolderService()
@@ -97,8 +100,11 @@ public sealed class DesktopFolderService : IDisposable
 
         bool goingToOriginal = string.Equals(path, _originalUserDesktop, StringComparison.OrdinalIgnoreCase);
 
-        // Save current layout before switching
+        // Stop any layout restore still running for the previous folder, then
+        // save the current layout (it must be captured before the switch)
+        CancelPendingLayoutRestore();
         _iconLayouts.SaveLayout(_currentRedirectedPath ?? _originalUserDesktop);
+        var namesBefore = Native.DesktopIconManager.ReadNames();
 
         // Write crash-recovery state on first redirect away from original
         // Without it a crash would leave the desktop redirected for good, so
@@ -117,18 +123,9 @@ public sealed class DesktopFolderService : IDisposable
             throw new IOException($"Windows refused to show {path} on the desktop.");
         _currentRedirectedPath = path;
 
-        // Restore saved layout (or auto-arrange grid for first visit)
-        string snapshotPath = path;
-        bool hasLayout = _iconLayouts.HasLayout(path);
-        int expectedCount = hasLayout ? _iconLayouts.GetSavedCount(path) : 1;
-        _ = Task.Run(async () =>
-        {
-            await WaitForIconsAsync(expectedCount);
-            if (hasLayout)
-                _iconLayouts.RestoreLayout(snapshotPath);
-            else
-                Native.DesktopIconManager.ArrangeInGrid();
-        });
+        // Restore saved layout (or auto-arrange grid for first visit) once
+        // Explorer shows the new folder
+        _pendingLayoutRestore = StartLayoutRestore(path, namesBefore, arrangeIfNew: true);
     }
 
     /// <summary>Restores the original desktop. Safe to call multiple times.</summary>
@@ -136,7 +133,9 @@ public sealed class DesktopFolderService : IDisposable
     {
         if (_currentRedirectedPath == null) return;
 
+        CancelPendingLayoutRestore();
         try { _iconLayouts.SaveLayout(_currentRedirectedPath); } catch { }
+        var namesBefore = Native.DesktopIconManager.ReadNames();
 
         // Keep the state file unless the restore really worked, so the next
         // start can still recover
@@ -146,17 +145,11 @@ public sealed class DesktopFolderService : IDisposable
 
         TryDelete(UserStateFile);
 
-        // Restore original desktop icon positions
-        if (_iconLayouts.HasLayout(_originalUserDesktop))
-        {
-            string origPath = _originalUserDesktop;
-            int origCount = _iconLayouts.GetSavedCount(_originalUserDesktop);
-            _ = Task.Run(async () =>
-            {
-                await WaitForIconsAsync(origCount);
-                _iconLayouts.RestoreLayout(origPath);
-            });
-        }
+        // Restore the original desktop's icon positions. This runs on exit, so
+        // wait for it (bounded) instead of leaving it to a task the exiting
+        // process would kill.
+        var restore = StartLayoutRestore(_originalUserDesktop, namesBefore, arrangeIfNew: false);
+        try { restore.Wait(TimeSpan.FromSeconds(3)); } catch { }
     }
 
     public void Dispose()
@@ -166,22 +159,70 @@ public sealed class DesktopFolderService : IDisposable
         Restore();
     }
 
-    // ── Icon readiness polling ────────────────────────────────────────────
+    // ── Layout restore after a switch ────────────────────────────────────
 
-    private static async Task WaitForIconsAsync(int expectedMin, int timeoutMs = 2000)
+    /// <summary>
+    /// Restores (or, for a first visit, arranges) the icons of path once
+    /// Explorer shows it. Restores run one at a time and a newer switch
+    /// cancels an older one, so navigating quickly can't apply one folder's
+    /// layout to another.
+    /// </summary>
+    private Task StartLayoutRestore(string path, HashSet<string> namesBefore, bool arrangeIfNew)
     {
-        if (expectedMin <= 0) expectedMin = 1;
-        int stable = 0, last = -1;
+        var cts = new CancellationTokenSource();
+        _layoutCts = cts;
+        var token = cts.Token;
+        bool hasLayout = _iconLayouts.HasLayout(path);
+        if (!hasLayout && !arrangeIfNew) return Task.CompletedTask;
+
+        return Task.Run(async () =>
+        {
+            await _layoutGate.WaitAsync(token);
+            try
+            {
+                await WaitForFolderShownAsync(namesBefore, token);
+                token.ThrowIfCancellationRequested();
+                if (hasLayout)
+                    _iconLayouts.RestoreLayout(path);
+                else
+                    Native.DesktopIconManager.ArrangeInGrid();
+            }
+            finally { _layoutGate.Release(); }
+        }, token);
+    }
+
+    private void CancelPendingLayoutRestore()
+    {
+        _layoutCts?.Cancel();
+        // Let a restore that's mid-write finish before reading positions again
+        try { _pendingLayoutRestore?.Wait(TimeSpan.FromSeconds(2)); } catch { }
+    }
+
+    /// <summary>
+    /// Waits until Explorer's icons are no longer the previous folder's and
+    /// the icon count has stopped changing. Checking only the count could
+    /// match the old folder's icons before Explorer refreshed.
+    /// </summary>
+    private static async Task WaitForFolderShownAsync(HashSet<string> namesBefore, CancellationToken token, int timeoutMs = 3000)
+    {
         var sw = System.Diagnostics.Stopwatch.StartNew();
+        bool changed = namesBefore.Count == 0;
+        int stable = 0, last = -1;
         while (sw.ElapsedMilliseconds < timeoutMs)
         {
-            int count = Native.DesktopIconManager.GetIconCount();
-            if (count >= expectedMin)
+            token.ThrowIfCancellationRequested();
+            if (!changed)
             {
-                if (count == last) { if (++stable >= 2) break; }
+                var now = Native.DesktopIconManager.ReadNames();
+                changed = !now.SetEquals(namesBefore);
+            }
+            else
+            {
+                int count = Native.DesktopIconManager.GetIconCount();
+                if (count == last) { if (++stable >= 2) return; }
                 else { stable = 0; last = count; }
             }
-            await Task.Delay(50);
+            await Task.Delay(50, token);
         }
     }
 

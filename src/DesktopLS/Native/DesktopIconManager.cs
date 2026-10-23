@@ -78,7 +78,23 @@ public static class DesktopIconManager
     // P/Invokes
     [DllImport("user32.dll", SetLastError = true)] private static extern IntPtr FindWindow(string lpClassName, string? lpWindowName);
     [DllImport("user32.dll", SetLastError = true)] private static extern IntPtr FindWindowEx(IntPtr hwndParent, IntPtr hwndChildAfter, string lpszClass, string? lpszWindow);
-    [DllImport("user32.dll")] private static extern IntPtr SendMessage(IntPtr hWnd, int Msg, IntPtr wParam, IntPtr lParam);
+    [DllImport("user32.dll", SetLastError = true)]
+    private static extern IntPtr SendMessageTimeout(IntPtr hWnd, int Msg, IntPtr wParam, IntPtr lParam,
+        uint fuFlags, uint uTimeout, out IntPtr lpdwResult);
+
+    private const uint SMTO_ABORTIFHUNG = 0x0002;
+    private const uint MessageTimeoutMs = 1000;
+
+    /// <summary>
+    /// SendMessage to Explorer's list view with a timeout: if Explorer is hung
+    /// the call returns (with 0) instead of freezing DesktopLS.
+    /// </summary>
+    private static IntPtr SendMessage(IntPtr hWnd, int msg, IntPtr wParam, IntPtr lParam)
+    {
+        return SendMessageTimeout(hWnd, msg, wParam, lParam, SMTO_ABORTIFHUNG, MessageTimeoutMs, out IntPtr result) == IntPtr.Zero
+            ? IntPtr.Zero
+            : result;
+    }
     [DllImport("user32.dll")] private static extern uint GetWindowThreadProcessId(IntPtr hWnd, out uint lpdwProcessId);
     [DllImport("user32.dll")] private static extern int GetWindowLong(IntPtr hWnd, int nIndex);
     [DllImport("user32.dll")] private static extern int SetWindowLong(IntPtr hWnd, int nIndex, int dwNewLong);
@@ -332,6 +348,10 @@ public static class DesktopIconManager
         }
         finally { CloseHandle(hProc); }
     }
+
+    /// <summary>Names of the icons currently on the desktop.</summary>
+    public static HashSet<string> ReadNames()
+        => new(ReadPositions().Keys, StringComparer.OrdinalIgnoreCase);
 
     public static int GetIconCount()
     {

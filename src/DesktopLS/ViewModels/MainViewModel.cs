@@ -42,6 +42,9 @@ public sealed class MainViewModel : INotifyPropertyChanged
         {
             _pathText = _navigation.CurrentPath;
             OnPropertyChanged(nameof(PathText));
+            // Back/Forward availability changed; don't wait for the next
+            // mouse/keyboard event to re-enable the buttons
+            ((RelayCommand)GoBackCommand).RaiseCanExecuteChanged();
         };
     }
 

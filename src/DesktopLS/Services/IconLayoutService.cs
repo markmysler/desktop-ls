@@ -8,6 +8,7 @@ namespace DesktopLS.Services;
 /// <summary>
 /// Persists desktop icon positions per folder + monitor configuration.
 /// Key format: "folderPath|monitorSignature"
+/// Thread-safe: saves happen on the UI thread, restores on a background one.
 /// </summary>
 public class IconLayoutService
 {
@@ -17,6 +18,7 @@ public class IconLayoutService
 
     // Outer key: "path|monitorSig", inner key: filename, value: [x, y]
     private Dictionary<string, Dictionary<string, int[]>> _store;
+    private readonly object _lock = new();
 
     public IconLayoutService()
     {
@@ -36,8 +38,11 @@ public class IconLayoutService
             foreach (var (name, (x, y)) in positions)
                 dict[name] = new[] { x, y };
 
-            _store[key] = dict;
-            Persist();
+            lock (_lock)
+            {
+                _store[key] = dict;
+                Persist();
+            }
         }
         catch { /* best effort */ }
     }
@@ -48,12 +53,14 @@ public class IconLayoutService
         try
         {
             string key = MakeKey(folderPath);
-            if (!_store.TryGetValue(key, out var dict) || dict.Count == 0) return;
-
             var positions = new Dictionary<string, (int, int)>(StringComparer.OrdinalIgnoreCase);
-            foreach (var (name, xy) in dict)
-                if (xy.Length >= 2)
-                    positions[name] = (xy[0], xy[1]);
+            lock (_lock)
+            {
+                if (!_store.TryGetValue(key, out var dict) || dict.Count == 0) return;
+                foreach (var (name, xy) in dict)
+                    if (xy.Length >= 2)
+                        positions[name] = (xy[0], xy[1]);
+            }
 
             DesktopIconManager.WritePositions(positions);
         }
@@ -64,14 +71,14 @@ public class IconLayoutService
     {
         if (string.IsNullOrEmpty(folderPath)) return false;
         string key = MakeKey(folderPath);
-        return _store.TryGetValue(key, out var dict) && dict.Count > 0;
+        lock (_lock) return _store.TryGetValue(key, out var dict) && dict.Count > 0;
     }
 
     public int GetSavedCount(string? folderPath)
     {
         if (string.IsNullOrEmpty(folderPath)) return 0;
         string key = MakeKey(folderPath);
-        return _store.TryGetValue(key, out var dict) ? dict.Count : 0;
+        lock (_lock) return _store.TryGetValue(key, out var dict) ? dict.Count : 0;
     }
 
     private static string MakeKey(string folderPath)
