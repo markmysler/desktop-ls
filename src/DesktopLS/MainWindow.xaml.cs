@@ -19,6 +19,7 @@ public partial class MainWindow : Window
         var navigation = new NavigationService();
         var autocomplete = new AutocompleteService();
         _desktopFolder = new DesktopFolderService();
+        ((App)Application.Current).DesktopFolder = _desktopFolder;
         _settings = new SettingsService();
         _settings.Load();
 
@@ -70,7 +71,7 @@ public partial class MainWindow : Window
         Top = 0;
 
         string startPath = Application.Current.Properties["StartPath"] as string
-            ?? Environment.GetFolderPath(Environment.SpecialFolder.Desktop);
+            ?? _desktopFolder.OriginalDesktop;
         _viewModel.Initialize(startPath);
 
         _windowMonitor.Start();

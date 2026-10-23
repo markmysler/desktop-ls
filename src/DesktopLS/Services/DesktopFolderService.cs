@@ -54,27 +54,36 @@ public sealed class DesktopFolderService : IDisposable
     {
         Directory.CreateDirectory(AppDataDir);
 
-        // Crash recovery: restore user desktop if state file left behind
-        if (File.Exists(UserStateFile))
+        // Crash recovery: a state file means a previous run ended while the
+        // desktop was redirected. Its content is the user's real desktop.
+        string? savedOriginal = ReadSavedOriginal();
+        if (savedOriginal != null)
         {
-            try
+            if (Directory.Exists(savedOriginal) && TrySetKnownFolderPath(savedOriginal))
             {
-                string saved = File.ReadAllText(UserStateFile).Trim();
-                if (!string.IsNullOrEmpty(saved) && Directory.Exists(saved))
-                    SetKnownFolderPath(saved);
+                TryDelete(UserStateFile);
             }
-            catch { }
-            finally { TryDelete(UserStateFile); }
+            else
+            {
+                // The original isn't reachable yet (e.g. OneDrive/network
+                // desktop not mounted) or the restore failed: keep the state
+                // file so the next start retries, and keep treating the saved
+                // path as the real desktop
+                _crashStateWritten = true;
+            }
         }
 
         // Version 1.0.0 moved Public Desktop items into a stash; put back
         // anything such a version left behind
         RestoreLegacyPublicStash();
 
-        _originalUserDesktop = GetKnownFolderPath();
+        _originalUserDesktop = savedOriginal ?? GetKnownFolderPath();
     }
 
     public string? CurrentPath => _currentRedirectedPath;
+
+    /// <summary>The user's real desktop folder (what Restore goes back to).</summary>
+    public string OriginalDesktop => _originalUserDesktop;
 
     /// <summary>
     /// Redirects the Windows desktop to show the given folder's contents.
@@ -98,7 +107,8 @@ public sealed class DesktopFolderService : IDisposable
             _crashStateWritten = true;
         }
 
-        SetKnownFolderPath(path);
+        if (!TrySetKnownFolderPath(path))
+            throw new IOException($"Windows refused to show {path} on the desktop.");
         _currentRedirectedPath = path;
 
         // Restore saved layout (or auto-arrange grid for first visit)
@@ -120,9 +130,11 @@ public sealed class DesktopFolderService : IDisposable
     {
         if (_currentRedirectedPath == null) return;
 
-        _iconLayouts.SaveLayout(_currentRedirectedPath);
+        try { _iconLayouts.SaveLayout(_currentRedirectedPath); } catch { }
 
-        SetKnownFolderPath(_originalUserDesktop);
+        // Keep the state file unless the restore really worked, so the next
+        // start can still recover
+        if (!TrySetKnownFolderPath(_originalUserDesktop)) return;
         _currentRedirectedPath = null;
         _crashStateWritten = false;
 
@@ -178,11 +190,24 @@ public sealed class DesktopFolderService : IDisposable
         finally { CoTaskMemFree(ptr); }
     }
 
-    private static void SetKnownFolderPath(string path)
+    /// <summary>Points the Desktop known folder at path; false if Windows refused.</summary>
+    private static bool TrySetKnownFolderPath(string path)
     {
         var guid = FOLDERID_Desktop;
-        SHSetKnownFolderPath(ref guid, 0, IntPtr.Zero, path);
+        int hr = SHSetKnownFolderPath(ref guid, 0, IntPtr.Zero, path);
         SHChangeNotify(SHCNE_ASSOCCHANGED, SHCNF_IDLIST | SHCNF_FLUSH, IntPtr.Zero, IntPtr.Zero);
+        return hr == 0;
+    }
+
+    private static string? ReadSavedOriginal()
+    {
+        try
+        {
+            if (!File.Exists(UserStateFile)) return null;
+            string saved = File.ReadAllText(UserStateFile).Trim();
+            return saved.Length > 0 ? saved : null;
+        }
+        catch { return null; }
     }
 
     // ── Legacy Public Desktop stash ──────────────────────────────────────
