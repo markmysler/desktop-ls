@@ -79,6 +79,29 @@
                          Padding="8,4"
                          KeyDown="PathBox_KeyDown"/>
 
+                <!-- Navigation errors (folder not found, access denied, ...) -->
+                <TextBlock Text="{Binding StatusMessage}"
+                           ToolTip="{Binding StatusMessage}"
+                           Foreground="#FF6B6B"
+                           Background="{StaticResource SurfaceBrush}"
+                           FontSize="11"
+                           Padding="6,0"
+                           MaxWidth="320"
+                           TextTrimming="CharacterEllipsis"
+                           HorizontalAlignment="Right"
+                           VerticalAlignment="Center"
+                           Margin="0,0,4,0">
+                    <TextBlock.Style>
+                        <Style TargetType="TextBlock">
+                            <Style.Triggers>
+                                <Trigger Property="Text" Value="">
+                                    <Setter Property="Visibility" Value="Collapsed"/>
+                                </Trigger>
+                            </Style.Triggers>
+                        </Style>
+                    </TextBlock.Style>
+                </TextBlock>
+
                 <Popup IsOpen="{Binding IsAutocompleteOpen}"
                        PlacementTarget="{Binding ElementName=PathBox}"
                        Placement="Bottom"

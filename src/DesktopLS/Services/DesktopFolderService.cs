@@ -101,9 +101,15 @@ public sealed class DesktopFolderService : IDisposable
         _iconLayouts.SaveLayout(_currentRedirectedPath ?? _originalUserDesktop);
 
         // Write crash-recovery state on first redirect away from original
+        // Without it a crash would leave the desktop redirected for good, so
+        // don't redirect if it can't be written
         if (!goingToOriginal && !_crashStateWritten)
         {
-            File.WriteAllText(UserStateFile, _originalUserDesktop);
+            try { File.WriteAllText(UserStateFile, _originalUserDesktop); }
+            catch (Exception ex)
+            {
+                throw new IOException($"Can't save recovery info, so the desktop wasn't changed: {ex.Message}", ex);
+            }
             _crashStateWritten = true;
         }
 

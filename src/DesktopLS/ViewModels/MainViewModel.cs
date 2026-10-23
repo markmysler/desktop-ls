@@ -17,6 +17,7 @@ public sealed class MainViewModel : INotifyPropertyChanged
     private readonly SettingsService _settings;
     private string _pathText = string.Empty;
     private bool _isAutocompleteOpen;
+    private string _statusMessage = string.Empty;
 
     public MainViewModel(
         NavigationService navigation,
@@ -94,12 +95,29 @@ public sealed class MainViewModel : INotifyPropertyChanged
     public ICommand GoUpCommand { get; }
     public ICommand RefreshCommand { get; }
 
+    /// <summary>Error or notice shown in the bar; empty when everything is fine.</summary>
+    public string StatusMessage
+    {
+        get => _statusMessage;
+        private set => SetField(ref _statusMessage, value);
+    }
+
     public void Initialize(string startPath)
     {
-        _navigation.NavigateTo(startPath);
-        _pathText = startPath;
+        if (!System.IO.Directory.Exists(startPath))
+        {
+            string requested = startPath;
+            startPath = _desktopFolder.OriginalDesktop;
+            if (!ShowFolder(startPath)) return;
+            _navigation.NavigateTo(startPath);
+            StatusMessage = $"Folder not found: {requested}";
+            return;
+        }
+
+        if (ShowFolder(startPath))
+            _navigation.NavigateTo(startPath);
+        _pathText = _navigation.CurrentPath;
         OnPropertyChanged(nameof(PathText));
-        _desktopFolder.SetDesktopPath(startPath);
     }
 
     /// <summary>Fills the path box with a suggestion without navigating.</summary>
@@ -117,40 +135,65 @@ public sealed class MainViewModel : INotifyPropertyChanged
         OnNavigate();
     }
 
+    /// <summary>
+    /// Shows a folder on the desktop. Every navigation goes through here so a
+    /// failure (folder deleted, access denied, ...) is reported in the bar
+    /// instead of crashing the app.
+    /// </summary>
+    private bool ShowFolder(string path)
+    {
+        if (!System.IO.Directory.Exists(path))
+        {
+            StatusMessage = $"Folder not found: {path}";
+            return false;
+        }
+
+        try
+        {
+            _desktopFolder.SetDesktopPath(path);
+            StatusMessage = string.Empty;
+            return true;
+        }
+        catch (Exception ex)
+        {
+            StatusMessage = ex.Message;
+            return false;
+        }
+    }
+
     private void OnNavigate()
     {
         string path = _pathText.Trim();
-        if (string.IsNullOrEmpty(path) || !System.IO.Directory.Exists(path))
-            return;
+        if (string.IsNullOrEmpty(path)) return;
 
-        _navigation.NavigateTo(path);
-        _desktopFolder.SetDesktopPath(path);
+        if (ShowFolder(path))
+            _navigation.NavigateTo(path);
         IsAutocompleteOpen = false;
     }
 
     private void OnGoBack()
     {
         string? path = _navigation.GoBack();
-        if (path != null) _desktopFolder.SetDesktopPath(path);
+        if (path != null) ShowFolder(path);
     }
 
     private void OnGoForward()
     {
         string? path = _navigation.GoForward();
-        if (path != null) _desktopFolder.SetDesktopPath(path);
+        if (path != null) ShowFolder(path);
     }
 
     private void OnGoUp()
     {
         string? path = _navigation.GoUp();
-        if (path != null) _desktopFolder.SetDesktopPath(path);
+        if (path != null) ShowFolder(path);
     }
 
     private void OnRefresh()
     {
         string path = _navigation.CurrentPath;
         if (!string.IsNullOrEmpty(path))
-            _desktopFolder.SetDesktopPath(path);
+            ShowFolder(path);
     }
 
     private async void UpdateAutocompleteSuggestions()
