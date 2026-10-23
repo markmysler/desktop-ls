@@ -10,11 +10,11 @@ namespace DesktopLS.Services;
 ///
 /// The Desktop known folder points at a junction DesktopLS owns
 /// (%LOCALAPPDATA%\DesktopLS\DesktopView). Switching folders retargets that
-/// junction and asks Explorer to refresh it. Explorer only reads the Desktop
-/// location when it starts (and, since Windows 11 25H2's October 2026
-/// updates, ignores every notification that it changed), so pointing the
-/// Desktop somewhere new on each switch no longer works; refreshing the same
-/// path with new contents does. While DesktopLS isn't switching, the junction
+/// junction and asks Explorer to refresh it. On Windows 11 25H2 the Explorer
+/// that Windows starts reads the Desktop location only at startup and
+/// ignores every notification that it changed, so pointing the Desktop
+/// somewhere new on each switch isn't reliable; refreshing the same path
+/// with new contents is. While DesktopLS isn't switching, the junction
 /// points at the user's real desktop, so the desktop looks and works as usual.
 ///
 /// Setting this up needs Explorer to restart once (or a sign-out).
