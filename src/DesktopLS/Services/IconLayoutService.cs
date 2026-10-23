@@ -82,14 +82,25 @@ public class IconLayoutService
     }
 
     private static string MakeKey(string folderPath)
-        => $"{folderPath}|{DesktopIconManager.GetMonitorSignature()}";
+        => $"{NormalizePath(folderPath)}|{DesktopIconManager.GetMonitorSignature()}";
+
+    /// <summary>
+    /// One spelling per folder, so "C:\x", "C:\x\" and "C:\x\..\x" share a
+    /// layout (case is handled by the case-insensitive store).
+    /// </summary>
+    internal static string NormalizePath(string path)
+    {
+        try { path = Path.GetFullPath(path); } catch { return path; }
+        string root = Path.GetPathRoot(path) ?? string.Empty;
+        return path.Length > root.Length ? path.TrimEnd('\\', '/') : path;
+    }
 
     private void Persist()
     {
         try
         {
             string json = JsonSerializer.Serialize(_store, new JsonSerializerOptions { WriteIndented = true });
-            File.WriteAllText(LayoutsFile, json);
+            AtomicFile.WriteAllText(LayoutsFile, json);
         }
         catch { }
     }
@@ -98,11 +109,28 @@ public class IconLayoutService
     {
         try
         {
-            if (!File.Exists(LayoutsFile)) return new();
+            if (!File.Exists(LayoutsFile)) return new(StringComparer.OrdinalIgnoreCase);
             string json = File.ReadAllText(LayoutsFile);
-            return JsonSerializer.Deserialize<Dictionary<string, Dictionary<string, int[]>>>(json)
-                   ?? new();
+            var loaded = JsonSerializer.Deserialize<Dictionary<string, Dictionary<string, int[]>>>(json) ?? new();
+            return NormalizeStore(loaded);
         }
-        catch { return new(); }
+        catch { return new(StringComparer.OrdinalIgnoreCase); }
+    }
+
+    /// <summary>
+    /// Older versions stored keys with the folder path as typed. Normalise
+    /// them so existing layouts keep matching, and make lookups case-insensitive.
+    /// </summary>
+    internal static Dictionary<string, Dictionary<string, int[]>> NormalizeStore(
+        Dictionary<string, Dictionary<string, int[]>> loaded)
+    {
+        var store = new Dictionary<string, Dictionary<string, int[]>>(StringComparer.OrdinalIgnoreCase);
+        foreach (var (key, layout) in loaded)
+        {
+            int bar = key.IndexOf('|');
+            string normalized = bar < 0 ? key : NormalizePath(key[..bar]) + key[bar..];
+            store[normalized] = new Dictionary<string, int[]>(layout, StringComparer.OrdinalIgnoreCase);
+        }
+        return store;
     }
 }

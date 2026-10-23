@@ -40,6 +40,7 @@ public sealed class SettingsService : ISettingsService
             if (_hideOnMaximized != value)
             {
                 _hideOnMaximized = value;
+                Save(); // persist right away; a crash used to lose the change
                 SettingsChanged?.Invoke();
             }
         }
@@ -56,6 +57,11 @@ public sealed class SettingsService : ISettingsService
             {
                 string? value = key?.GetValue(RegistryValueName) as string;
                 _startupEnabled = !string.IsNullOrEmpty(value);
+
+                // If the exe was moved (or the entry predates quoting), point
+                // it at the current, quoted location
+                if (_startupEnabled && value != StartupCommand())
+                    ApplyStartupSetting();
             }
 
             // Load hide-on-maximized from JSON
@@ -80,7 +86,7 @@ public sealed class SettingsService : ISettingsService
             var data = new SettingsData { HideOnMaximized = _hideOnMaximized };
             string json = JsonSerializer.Serialize(data, new JsonSerializerOptions { WriteIndented = true });
             Directory.CreateDirectory(Path.GetDirectoryName(SettingsFile)!);
-            File.WriteAllText(SettingsFile, json);
+            AtomicFile.WriteAllText(SettingsFile, json);
         }
         catch
         {
@@ -98,10 +104,9 @@ public sealed class SettingsService : ISettingsService
 
                 if (_startupEnabled)
                 {
-                    // Use Environment.ProcessPath for single-file apps
-                    string? exePath = Environment.ProcessPath;
-                    if (!string.IsNullOrEmpty(exePath))
-                        key.SetValue(RegistryValueName, exePath, RegistryValueKind.String);
+                    string? command = StartupCommand();
+                    if (command != null)
+                        key.SetValue(RegistryValueName, command, RegistryValueKind.String);
                 }
                 else
                 {
@@ -113,6 +118,17 @@ public sealed class SettingsService : ISettingsService
         {
             // Best-effort registry write
         }
+    }
+
+    /// <summary>
+    /// The Run-key command for this exe. Quoted, so a path with spaces can't
+    /// be misread as a different program plus arguments.
+    /// </summary>
+    internal static string? StartupCommand()
+    {
+        // Environment.ProcessPath is correct for single-file apps too
+        string? exePath = Environment.ProcessPath;
+        return string.IsNullOrEmpty(exePath) ? null : $"\"{exePath}\"";
     }
 
     private class SettingsData
