@@ -20,6 +20,15 @@ public partial class MainWindow : Window
         var autocomplete = new AutocompleteService();
         _desktopFolder = new DesktopFolderService();
         ((App)Application.Current).DesktopFolder = _desktopFolder;
+        if (_desktopFolder.NeedsExplorerRestart &&
+            MessageBox.Show(
+                "To switch folders on the desktop, DesktopLS has to restart Windows Explorer once.\n\n" +
+                "The taskbar disappears for a few seconds and open File Explorer windows close. " +
+                "This is only needed the first time.\n\nRestart Explorer now? (Choose No to wait until you next sign in.)",
+                "DesktopLS", MessageBoxButton.YesNo, MessageBoxImage.Information) == MessageBoxResult.Yes)
+        {
+            _desktopFolder.RestartExplorerForSetup();
+        }
         _settings = new SettingsService();
         _settings.Load();
 

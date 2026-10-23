@@ -17,6 +17,10 @@ public static class DesktopIconManager
     private const int LVM_GETITEMW = LVM_FIRST + 75;
     private const int LVM_GETITEMPOSITION = LVM_FIRST + 16;
     private const int LVM_SETITEMPOSITION32 = LVM_FIRST + 49;
+    private const int LVM_SETITEMSTATE = LVM_FIRST + 43;
+    private const int LVM_GETITEMSPACING = LVM_FIRST + 51;
+    private const uint LVIS_FOCUSED = 0x0001;
+    private const uint LVIS_SELECTED = 0x0002;
 
     // LVITEM flags
     private const int LVIF_TEXT = 0x0001;
@@ -115,9 +119,21 @@ public static class DesktopIconManager
 
     // ── Public API ────────────────────────────────────────────────────────
 
+    /// <summary>Positions by display name (a name shown twice keeps one of them).</summary>
     public static Dictionary<string, (int X, int Y)> ReadPositions()
     {
-        var result = new Dictionary<string, (int, int)>(StringComparer.OrdinalIgnoreCase);
+        var result = new Dictionary<string, (int X, int Y)>(StringComparer.OrdinalIgnoreCase);
+        foreach (var (name, x, y) in ReadItems()) result[name] = (x, y);
+        return result;
+    }
+
+    /// <summary>Every icon's display name, duplicates included.</summary>
+    public static List<string> ReadAllNames() => ReadItems().Select(i => i.Name).ToList();
+
+    /// <summary>Every icon's display name and position, duplicates included.</summary>
+    public static List<(string Name, int X, int Y)> ReadItems()
+    {
+        var result = new List<(string, int, int)>();
         IntPtr lv = GetDesktopListView();
         if (lv == IntPtr.Zero) return result;
 
@@ -158,13 +174,13 @@ public static class DesktopIconManager
                     if (!WriteProcessMemory(hProc, remoteBlock, itemBytes, lvItemSize, out _)) continue;
                     SendMessage(lv, LVM_GETITEMW, (IntPtr)i, remoteBlock);
                     if (!ReadProcessMemory(hProc, remoteText, textBytes, textBufSize, out _)) continue;
-                    string name = Encoding.Unicode.GetString(textBytes).TrimEnd('\0');
+                    string name = DecodeName(textBytes);
                     if (string.IsNullOrEmpty(name)) continue;
 
                     if (SendMessage(lv, LVM_GETITEMPOSITION, (IntPtr)i, remotePt) == IntPtr.Zero) continue;
                     if (!ReadProcessMemory(hProc, remotePt, ptBytes, ptSize, out _)) continue;
                     var pt = BytesToStruct<POINT>(ptBytes);
-                    result[name] = (pt.X, pt.Y);
+                    result.Add((name, pt.X, pt.Y));
                 }
             }
             finally { VirtualFreeEx(hProc, remoteBlock, 0, MEM_RELEASE); }
@@ -174,9 +190,21 @@ public static class DesktopIconManager
         return result;
     }
 
+    /// <summary>Moves icons to positions looked up by display name.</summary>
     public static void WritePositions(Dictionary<string, (int X, int Y)> positions)
     {
         if (positions.Count == 0) return;
+        WritePositions((name, _) => positions.TryGetValue(name, out var p) ? p : null);
+    }
+
+    /// <summary>
+    /// Moves icons with LVM_SETITEMPOSITION32. For each icon, targetFor gets
+    /// its display name and current position and returns where it should go
+    /// (or null to leave it). Unlike IFolderView.SelectAndPositionItems this
+    /// never bumps icons that occupy a target slot.
+    /// </summary>
+    public static void WritePositions(Func<string, (int X, int Y), (int X, int Y)?> targetFor)
+    {
         IntPtr lv = GetDesktopListView();
         if (lv == IntPtr.Zero) return;
 
@@ -214,7 +242,8 @@ public static class DesktopIconManager
 
                 try
                 {
-                    var indexMap = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
+                    // Work out every target first (from the current layout), then move
+                    var targets = new List<(int Index, int X, int Y)>();
                     var item = new LVITEMW { mask = LVIF_TEXT, iSubItem = 0, pszText = remoteText, cchTextMax = MaxPath };
 
                     for (int i = 0; i < count; i++)
@@ -224,17 +253,23 @@ public static class DesktopIconManager
                         if (!WriteProcessMemory(hProc, remoteBlock, itemBytes, lvItemSize, out _)) continue;
                         SendMessage(lv, LVM_GETITEMW, (IntPtr)i, remoteBlock);
                         if (!ReadProcessMemory(hProc, remoteText, textBytes, textBufSize, out _)) continue;
-                        string name = Encoding.Unicode.GetString(textBytes).TrimEnd('\0');
-                        if (!string.IsNullOrEmpty(name)) indexMap[name] = i;
+                        string name = DecodeName(textBytes);
+                        if (string.IsNullOrEmpty(name)) continue;
+
+                        if (SendMessage(lv, LVM_GETITEMPOSITION, (IntPtr)i, remotePt) == IntPtr.Zero) continue;
+                        if (!ReadProcessMemory(hProc, remotePt, ptBytes, ptSize, out _)) continue;
+                        var current = BytesToStruct<POINT>(ptBytes);
+
+                        if (targetFor(name, (current.X, current.Y)) is { } target)
+                            targets.Add((i, target.X, target.Y));
                     }
 
                     // Suppress redraws while repositioning so all icons snap at once
                     SendMessage(lv, WM_SETREDRAW, IntPtr.Zero, IntPtr.Zero);
                     try
                     {
-                        foreach (var (name, (x, y)) in positions)
+                        foreach (var (idx, x, y) in targets)
                         {
-                            if (!indexMap.TryGetValue(name, out int idx)) continue;
                             var pt = new POINT { X = x, Y = y };
                             MarshalToBytes(pt, ptBytes);
                             if (!WriteProcessMemory(hProc, remotePt, ptBytes, ptSize, out _)) continue;
@@ -358,6 +393,106 @@ public static class DesktopIconManager
         finally { CloseHandle(hProc); }
     }
 
+    /// <summary>
+    /// Clears keyboard focus and selection on the desktop icons. A focused
+    /// icon shows its full (possibly multi-line) label, which covers the grid
+    /// slot below it; with align-to-grid on, Explorer then refuses to place
+    /// another icon there and pushes it (and the rest of the column) down.
+    /// </summary>
+    public static void ClearFocusAndSelection()
+    {
+        IntPtr lv = GetDesktopListView();
+        if (lv == IntPtr.Zero) return;
+
+        GetWindowThreadProcessId(lv, out uint pid);
+        IntPtr hProc = OpenProcess(PROCESS_VM_READ | PROCESS_VM_WRITE | PROCESS_VM_OPERATION, false, pid);
+        if (hProc == IntPtr.Zero) { LogOpenFailure(); return; }
+        try
+        {
+            uint size = (uint)Marshal.SizeOf<LVITEMW>();
+            IntPtr remote = VirtualAllocEx(hProc, IntPtr.Zero, size, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
+            if (remote == IntPtr.Zero) return;
+            try
+            {
+                var item = new LVITEMW { stateMask = LVIS_FOCUSED | LVIS_SELECTED, state = 0 };
+                byte[] bytes = new byte[size];
+                MarshalToBytes(item, bytes);
+                if (WriteProcessMemory(hProc, remote, bytes, size, out _))
+                    SendMessage(lv, LVM_SETITEMSTATE, (IntPtr)(-1), remote); // -1 = all items
+            }
+            finally { VirtualFreeEx(hProc, remote, 0, MEM_RELEASE); }
+        }
+        finally { CloseHandle(hProc); }
+    }
+
+    /// <summary>
+    /// Every slot of the desktop's icon grid on all monitors, column-major
+    /// per monitor, in list-view coordinates. The grid pitch is the list
+    /// view's icon spacing; its offset is taken from where icons sit now
+    /// (Explorer snaps icons to it with align-to-grid on).
+    /// </summary>
+    public static List<(int X, int Y)> GridSlots(IReadOnlyCollection<(int X, int Y)> currentPositions)
+    {
+        var slots = new List<(int X, int Y)>();
+        IntPtr lv = GetDesktopListView();
+        if (lv == IntPtr.Zero) return slots;
+
+        long spacing = (long)SendMessage(lv, LVM_GETITEMSPACING, IntPtr.Zero, IntPtr.Zero);
+        int sx = (int)(spacing & 0xFFFF), sy = (int)((spacing >> 16) & 0xFFFF);
+        if (sx <= 0 || sy <= 0) return slots;
+
+        // Most common offset of the icons on the grid (e.g. 14,2)
+        int offX = MostCommon(currentPositions.Select(p => Mod(p.X, sx)), 0);
+        int offY = MostCommon(currentPositions.Select(p => Mod(p.Y, sy)), 0);
+
+        _workAreaCollector = new List<RECT>();
+        EnumDisplayMonitors(IntPtr.Zero, IntPtr.Zero, WorkAreaEnumCallback, IntPtr.Zero);
+        var workAreas = _workAreaCollector;
+        _workAreaCollector = null;
+        workAreas.Sort((a, b) => a.Left != b.Left ? a.Left.CompareTo(b.Left) : a.Top.CompareTo(b.Top));
+
+        int originX = GetSystemMetrics(SM_XVIRTUALSCREEN);
+        int originY = GetSystemMetrics(SM_YVIRTUALSCREEN);
+        foreach (var wa in workAreas)
+        {
+            int left = wa.Left - originX, top = wa.Top - originY;
+            int right = wa.Right - originX, bottom = wa.Bottom - originY;
+            int firstX = left + Mod(offX - left, sx), firstY = top + Mod(offY - top, sy);
+            for (int x = firstX; x + sx <= right; x += sx)
+                for (int y = firstY; y + sy <= bottom; y += sy)
+                    slots.Add((x, y));
+        }
+        return slots;
+    }
+
+    private static int Mod(int a, int m) => ((a % m) + m) % m;
+
+    private static int MostCommon(IEnumerable<int> values, int fallback)
+        => values.GroupBy(v => v).OrderByDescending(g => g.Count()).Select(g => g.Key).DefaultIfEmpty(fallback).First();
+
+    [DllImport("user32.dll")] private static extern bool LockWindowUpdate(IntPtr hWndLock);
+
+    /// <summary>
+    /// Stops the desktop icons from being drawn, so a folder switch and the
+    /// layout restore after it show up as one change instead of icons
+    /// appearing in Explorer's default spots and then moving. Unlike
+    /// WM_SETREDRAW, Explorer can't turn this back on while it refreshes.
+    /// Must be undone with <see cref="UnlockDrawing"/> on the same thread.
+    /// </summary>
+    public static bool LockDrawing()
+    {
+        IntPtr lv = GetDesktopListView();
+        return lv != IntPtr.Zero && LockWindowUpdate(lv);
+    }
+
+    /// <summary>Draws the desktop icons again (all at once).</summary>
+    public static void UnlockDrawing()
+    {
+        LockWindowUpdate(IntPtr.Zero);
+        IntPtr lv = GetDesktopListView();
+        if (lv != IntPtr.Zero) InvalidateRect(lv, IntPtr.Zero, true);
+    }
+
     /// <summary>Names of the icons currently on the desktop.</summary>
     public static HashSet<string> ReadNames()
         => new(ReadPositions().Keys, StringComparer.OrdinalIgnoreCase);
@@ -435,6 +570,17 @@ public static class DesktopIconManager
         if (host == IntPtr.Zero) return IntPtr.Zero;
         IntPtr shellView = FindWindowEx(host, IntPtr.Zero, "SHELLDLL_DefView", null);
         return shellView == IntPtr.Zero ? IntPtr.Zero : FindWindowEx(shellView, IntPtr.Zero, "SysListView32", null);
+    }
+
+    /// <summary>
+    /// The text buffer is reused for every item, so after a short name it
+    /// still holds the tail of a longer previous one. Stop at the first NUL.
+    /// </summary>
+    internal static string DecodeName(byte[] utf16)
+    {
+        string text = Encoding.Unicode.GetString(utf16);
+        int end = text.IndexOf('\0');
+        return end < 0 ? text : text[..end];
     }
 
     private static void LogOpenFailure()

@@ -16,8 +16,11 @@ A lightweight navigation bar for the Windows desktop. Point your desktop at any 
 - **Icon layout memory**: icon positions are saved per folder and per monitor setup, and restored when you come back
 - **First-visit grid**: a folder you've never opened gets its icons laid out in a tidy grid across all monitors
 - **Auto-hide** (on by default): the bar hides while another window is maximized
-- **Crash recovery**: your real desktop is recorded before any change and restored on exit, on errors, at log-off, and on the next start after a crash
+- **No Explorer restarts**: switching folders takes well under a second and leaves the taskbar and your open windows alone
+- **Crash recovery**: your real desktop comes back on exit, on errors, at log-off, and on the next start after a crash
 - **Single `.exe`**: the release build is self-contained; no .NET install needed
+
+Network folders can't be shown (Windows junctions only reach local drives).
 
 ## What DesktopLS changes on your system
 
@@ -25,14 +28,19 @@ DesktopLS changes Windows settings, so here is exactly what it touches and how t
 
 | What | Where | When it's undone |
 |---|---|---|
-| Your **Desktop folder location** | `HKCU\Software\Microsoft\Windows\CurrentVersion\Explorer\User Shell Folders` → `Desktop` (via `SHSetKnownFolderPath`) | When you close DesktopLS, when it crashes or Windows logs off, or at the latest the next time it starts |
-| A recovery file holding your real desktop path | `%LocalAppData%\DesktopLS\desktop_original.txt` | Deleted once the desktop is restored |
-| Saved icon layouts and settings | `%LocalAppData%\DesktopLS\layouts.json`, `settings.json` | Kept; delete the folder to reset |
+| Your **Desktop folder location**, pointed at a junction DesktopLS owns | `HKCU\Software\Microsoft\Windows\CurrentVersion\Explorer\User Shell Folders` → `Desktop` = `%LocalAppData%\DesktopLS\DesktopView` | Stays set (see below). While DesktopLS isn't showing another folder, the junction points at your real desktop, so everything looks and works as before and files you save to the Desktop land in your real Desktop folder |
+| The junction itself | `%LocalAppData%\DesktopLS\DesktopView` → your real desktop, or the folder being shown | Pointed back at your real desktop when you close DesktopLS, when it crashes or Windows logs off, or at the latest the next time it starts |
+| Your real desktop path | `%LocalAppData%\DesktopLS\desktop_real.txt` | Kept while the junction is in use |
+| Saved icon layouts and settings | `%LocalAppData%\DesktopLS\layouts.json`, `settings.json` | Kept; delete them to reset |
 | "Run on startup" (only if you enable it) | `HKCU\Software\Microsoft\Windows\CurrentVersion\Run` → `DesktopLS` | Removed when you turn the setting off |
+
+The first time it runs, DesktopLS points your Desktop at the junction and asks to restart Explorer once (or you can wait until you next sign in): Explorer only reads the Desktop location when it starts. After that, switching never restarts Explorer.
 
 It never modifies the shared **Public Desktop** (`C:\Users\Public\Desktop`); its shortcuts stay visible on any folder you open. (Version 1.0.0 did move them; starting a newer version puts back anything it left behind.)
 
-**If your desktop is ever stuck on another folder**, start DesktopLS once and close it, or fix it by hand: right-click your Desktop folder in File Explorer → **Properties** → **Location** → **Restore Default** → OK.
+**If your desktop is ever stuck on another folder**, start DesktopLS once and close it.
+
+**To stop using the junction** (for example before uninstalling): close DesktopLS, then right-click your Desktop folder in File Explorer → **Properties** → **Location**, type your real desktop path (usually `C:\Users\<you>\Desktop`) → OK, and answer **No** when asked to move the files. Sign out and back in, then remove the junction with `rmdir "%LocalAppData%\DesktopLS\DesktopView"` (plain `rmdir` removes only the junction, never what it points at).
 
 ## Installation
 
@@ -68,8 +76,8 @@ If a folder can't be opened (deleted, no access), the bar says so instead of cha
 
 ## How it works
 
-- **Redirecting the desktop:** `SHSetKnownFolderPath(FOLDERID_Desktop, …)`, followed by `SHChangeNotify` so Explorer refreshes. The original path is saved first so every exit path can restore it.
-- **Icon positions:** Explorer's desktop is a `SysListView32` control in another process. DesktopLS allocates a buffer inside Explorer (`VirtualAllocEx`), sends `LVM_GETITEMW` / `LVM_GETITEMPOSITION` / `LVM_SETITEMPOSITION32`, and reads the results back with `ReadProcessMemory`. Layouts are stored in `layouts.json`, keyed by folder and monitor configuration.
+- **Switching the desktop:** the Desktop known folder points at an NTFS junction. A switch replaces the junction's target in place (`FSCTL_SET_REPARSE_POINT`, so the path never disappears) and sends `SHCNE_UPDATEDIR` for it; Explorer re-reads the same path and finds the new folder's contents. Changing the Desktop location itself no longer works: since the October 2026 updates, Windows 11 25H2's Explorer ignores every notification that the location changed and only picks it up when it restarts.
+- **Icon positions:** Explorer's desktop is a `SysListView32` control in another process. DesktopLS allocates a buffer inside Explorer (`VirtualAllocEx`), sends `LVM_GETITEMW` / `LVM_GETITEMPOSITION` / `LVM_SETITEMPOSITION32`, and reads the results back with `ReadProcessMemory`. Icons are identified by file name through the shell's `IFolderView`, since display names repeat (`report.pdf` and `report.docx` both show as "report"). With align-to-grid on, Explorer won't drop an icon on an occupied slot; it pushes it and the rest of the column down. So a restore first moves the icons that have to move to free slots no icon wants, then puts each on its saved spot. Drawing is locked (`LockWindowUpdate`) during a switch so it shows up as one change. Layouts are stored in `layouts.json`, keyed by folder and monitor configuration.
 - **Auto-hide:** checks the foreground windows for a maximized one every 500 ms.
 
 ## Development
