@@ -39,6 +39,8 @@ public static class DesktopIconManager
     // System metrics
     private const int SM_CXICONSPACING = 38;
     private const int SM_CYICONSPACING = 39;
+    private const int SM_XVIRTUALSCREEN = 76;
+    private const int SM_YVIRTUALSCREEN = 77;
 
     [StructLayout(LayoutKind.Sequential)]
     private struct POINT { public int X; public int Y; }
@@ -276,6 +278,12 @@ public static class DesktopIconManager
         if (workAreas.Count == 0) return;
         workAreas.Sort((a, b) => a.Left != b.Left ? a.Left.CompareTo(b.Left) : a.Top.CompareTo(b.Top));
 
+        // The desktop list view spans the whole virtual screen, so its (0,0) is
+        // the virtual screen's top-left, which is negative when a monitor sits
+        // left of or above the primary. Convert screen coordinates to it.
+        int originX = GetSystemMetrics(SM_XVIRTUALSCREEN);
+        int originY = GetSystemMetrics(SM_YVIRTUALSCREEN);
+
         // Build flat list of (x,y) slots across all monitors, column-major
         var slots = new List<(int x, int y)>();
         foreach (var wa in workAreas)
@@ -284,7 +292,7 @@ public static class DesktopIconManager
             int cols = Math.Max(1, (wa.Right - wa.Left) / sx);
             for (int c = 0; c < cols; c++)
                 for (int r = 0; r < rows; r++)
-                    slots.Add((wa.Left + c * sx, wa.Top + r * sy));
+                    slots.Add((wa.Left - originX + c * sx, wa.Top - originY + r * sy));
         }
 
         // Read icon names, assign slots
@@ -324,11 +332,6 @@ public static class DesktopIconManager
                 {
                     for (int i = 0; i < Math.Min(count, slots.Count); i++)
                     {
-                        item.iItem = i;
-                        MarshalToBytes(item, itemBytes);
-                        WriteProcessMemory(hProc, remoteBlock, itemBytes, lvItemSize, out _);
-                        SendMessage(lv, LVM_GETITEMW, (IntPtr)i, remoteBlock);
-
                         var (x, y) = slots[i];
                         var pt = new POINT { X = x, Y = y };
                         MarshalToBytes(pt, ptBytes);
@@ -398,32 +401,34 @@ public static class DesktopIconManager
 
     // ── Internal helpers ─────────────────────────────────────────────────
 
+    /// <summary>
+    /// Finds the desktop's SysListView32. It lives in SHELLDLL_DefView under
+    /// Progman, or, after a wallpaper slideshow / Win+Tab / on some builds,
+    /// under a WorkerW window: either a top-level one or a child of Progman.
+    /// </summary>
     private static IntPtr GetDesktopListView()
     {
         IntPtr progman = FindWindow("Progman", null);
-        if (progman != IntPtr.Zero)
-        {
-            IntPtr shellView = FindWindowEx(progman, IntPtr.Zero, "SHELLDLL_DefView", null);
-            if (shellView != IntPtr.Zero)
-            {
-                IntPtr lv = FindWindowEx(shellView, IntPtr.Zero, "SysListView32", null);
-                if (lv != IntPtr.Zero) return lv;
-            }
+        IntPtr lv = ListViewUnder(progman);
+        if (lv != IntPtr.Zero) return lv;
 
+        foreach (IntPtr parent in new[] { IntPtr.Zero, progman })
+        {
             IntPtr workerW = IntPtr.Zero;
-            while (true)
+            while ((workerW = FindWindowEx(parent, workerW, "WorkerW", null)) != IntPtr.Zero)
             {
-                workerW = FindWindowEx(progman, workerW, "WorkerW", null);
-                if (workerW == IntPtr.Zero) break;
-                shellView = FindWindowEx(workerW, IntPtr.Zero, "SHELLDLL_DefView", null);
-                if (shellView != IntPtr.Zero)
-                {
-                    IntPtr lv = FindWindowEx(shellView, IntPtr.Zero, "SysListView32", null);
-                    if (lv != IntPtr.Zero) return lv;
-                }
+                lv = ListViewUnder(workerW);
+                if (lv != IntPtr.Zero) return lv;
             }
         }
         return IntPtr.Zero;
+    }
+
+    private static IntPtr ListViewUnder(IntPtr host)
+    {
+        if (host == IntPtr.Zero) return IntPtr.Zero;
+        IntPtr shellView = FindWindowEx(host, IntPtr.Zero, "SHELLDLL_DefView", null);
+        return shellView == IntPtr.Zero ? IntPtr.Zero : FindWindowEx(shellView, IntPtr.Zero, "SysListView32", null);
     }
 
     private static void MarshalToBytes<T>(T s, byte[] dest) where T : struct
